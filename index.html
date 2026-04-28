@@ -614,21 +614,36 @@ function setDbStatus(state, msg) {
 }
 
 // ── LOAD from Supabase at startup ────────────────────────
+// Fetch ALL rows from a Supabase table by paginating in batches of 1000
+async function fetchAll(table, select = '*', filters = null) {
+  const PAGE = 1000;
+  let all = [], from = 0;
+  while (true) {
+    let q = sb.from(table).select(select).range(from, from + PAGE - 1);
+    if (filters) q = filters(q);
+    const { data, error } = await q;
+    if (error) throw error;
+    all = all.concat(data || []);
+    if (!data || data.length < PAGE) break;   // last page
+    from += PAGE;
+  }
+  return all;
+}
+
 async function loadFromSupabase() {
   setDbStatus('loading', 'Loading…');
   try {
-    const [locRes, itemRes, ruleRes, discoRes] = await Promise.all([
-      sb.from('locations').select('*'),
-      sb.from('items').select('*'),
+    // Paginate locations and items (can exceed 1,000 rows)
+    // Rules and disco_locs are tiny — single fetch is fine
+    const [locs, itms, ruleRes, discoRes] = await Promise.all([
+      fetchAll('locations'),
+      fetchAll('items'),
       sb.from('zone_rules').select('*').eq('id', 1).single(),
       sb.from('disco_locs').select('loc_id')
     ]);
 
-    if (locRes.error)  throw locRes.error;
-    if (itemRes.error) throw itemRes.error;
-
-    locations = locRes.data  || [];
-    items     = itemRes.data || [];
+    locations = locs;
+    items     = itms;
     discoLocs = (discoRes.data || []).map(r => r.loc_id);
 
     if (ruleRes.data && !ruleRes.error) {
@@ -642,7 +657,7 @@ async function loadFromSupabase() {
       };
     }
 
-    setDbStatus('ok', `Live · ${locations.length.toLocaleString()} locs`);
+    setDbStatus('ok', `Live · ${locations.length.toLocaleString()} locs · ${items.length.toLocaleString()} items`);
     loadRulesToDOM();
     updateSummary();
     renderDashboard();
@@ -661,20 +676,59 @@ function chunk(arr, n) {
   return out;
 }
 
+// Strip item object to only the columns Supabase expects
+function sanitizeItem(item) {
+  return {
+    sku:       item.sku       || null,
+    barcode:   item.barcode   || null,
+    mg:        item.mg        || null,
+    weight:    +item.weight   || 0,
+    item_desc: item.item_desc || null,
+    l:         +item.l        || 0,
+    w:         +item.w        || 0,
+    h:         +item.h        || 0,
+    icube:     +item.icube    || 0,
+    crushable: item.crushable || 'N',
+    velocity:  item.velocity  || null,
+    picks30:   +item.picks30  || 0,
+    dispLoc:   item.dispLoc   || item.slot || null,
+    slot:      item.slot      || null,
+    replens:   +item.replens  || 0,
+  };
+}
+
+// Strip location object to only the columns Supabase expects
+function sanitizeLocation(loc) {
+  return {
+    id:       loc.id       || null,
+    area:     loc.area     || null,
+    zone:     loc.zone     || 'silver',
+    type:     loc.type     || 'standard',
+    l:        +loc.l       || 0,
+    w:        +loc.w       || 0,
+    h:        +loc.h       || 0,
+    cube:     +loc.cube    || 0,
+    sku:      loc.sku      || null,
+  };
+}
+
 // Upsert all locations in batches of 500 (Supabase row limit per request)
 async function saveLocations() {
   if (!locations.length) return;
   setDbStatus('saving', 'Saving…');
   try {
     for (const batch of chunk(locations, 500)) {
-      const { error } = await sb.from('locations').upsert(batch, { onConflict: 'id' });
-      if (error) throw error;
+      const { data, error } = await sb.from('locations').upsert(batch.map(sanitizeLocation), { onConflict: 'id' });
+      if (error) {
+        console.error('saveLocations batch error:', error);
+        throw error;
+      }
     }
     setDbStatus('ok', `Live · ${locations.length.toLocaleString()} locs`);
   } catch(e) {
     console.error('saveLocations error:', e);
-    setDbStatus('error', 'Save failed');
-    toast('⚠️ Location save failed: ' + e.message);
+    setDbStatus('error', 'Save failed — ' + e.message);
+    toast('⚠️ Location save failed: ' + e.message + ' — Check Supabase RLS policies.', 8000);
   }
 }
 
@@ -684,14 +738,17 @@ async function saveItems() {
   setDbStatus('saving', 'Saving…');
   try {
     for (const batch of chunk(items, 500)) {
-      const { error } = await sb.from('items').upsert(batch, { onConflict: 'sku' });
-      if (error) throw error;
+      const { data, error } = await sb.from('items').upsert(batch.map(sanitizeItem), { onConflict: 'sku' });
+      if (error) {
+        console.error('saveItems batch error:', error);
+        throw error;
+      }
     }
     setDbStatus('ok', `Live · ${locations.length.toLocaleString()} locs`);
   } catch(e) {
     console.error('saveItems error:', e);
-    setDbStatus('error', 'Save failed');
-    toast('⚠️ Item save failed: ' + e.message);
+    setDbStatus('error', 'Save failed — ' + e.message);
+    toast('⚠️ Item save failed: ' + e.message + ' — Check Supabase RLS policies.', 8000);
   }
 }
 
@@ -2132,7 +2189,7 @@ function dl(csv, name) {
 
 // ── Clear all data ───────────────────────────────────────
 async function clearAllData() {
-  if (!confirm('⚠️ This will permanently delete ALL locations, items, and replen data from the shared database. \n Everyone using the tool will lose their data.\n Are you sure?')) return;
+  if (!confirm('⚠️ This will permanently delete ALL locations, items, and replen data from the shared database.\n\nEveryone using the tool will lose their data.\n\nAre you sure?')) return;
   if (!confirm('Last chance — click OK to wipe everything and start fresh.')) return;
 
   setDbStatus('saving', 'Clearing…');
