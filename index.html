@@ -347,7 +347,7 @@ pre{background:#f8fafc;padding:12px;border-radius:6px;font-size:11px;border:1px 
       </div>
       <div class="txt-sm txt-muted" style="margin-bottom:10px">
         Key cols: <code>Location (or SKU/Item) · Replen Count</code> — 30-day replenishment events per slot.<br>
-        High-count items flagged as candidates for larger locations.
+        <strong>💡 If using the Velocity Report above, Repln Tasks is already captured automatically — this drop zone is only needed if you have a separate standalone replen file.</strong>
       </div>
       <div class="dz" id="dz-repl" ondragover="dzOver(event,'dz-repl')" ondragleave="dzOut('dz-repl')" ondrop="dzDrop(event,'replen')" onclick="document.getElementById('fi-repl').click()">
         <div class="dz-icon">🔄</div>
@@ -581,8 +581,8 @@ Location or SKU    Replen_Count (30-day total)</pre>
 // ═══════════════════════════════════════════════════════
 // 👇 Replace these two values with your own from Supabase dashboard
 //    Project Settings → API → Project URL and anon public key
-const SUPABASE_URL  = 'https://ebwtjqzrwkycbnmhsulv.supabase.co';
-const SUPABASE_ANON = 'sb_publishable_dlSlJlh4bJSsqajG4dlfxA_YmXy5t8r';
+const SUPABASE_URL  = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON = 'YOUR_SUPABASE_ANON_KEY';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
@@ -1115,7 +1115,7 @@ async function parseVelocity(rows) {
 
     const obj = {
       sku, barcode, mg, weight,
-      desc:    ff(r, ['desc','description','item_desc']) || ffExact(r, ['item_name']) || sku,
+      item_desc: ff(r, ['desc','description','item_desc']) || ffExact(r, ['item_name']) || sku,
       l, w, h, icube: ic,
       crushable: existing?.crushable || 'N',  // velocity report has no crushable flag; preserve existing
       velocity:  vel,
@@ -1140,12 +1140,14 @@ async function parseVelocity(rows) {
   });
 
   await saveItems();
-  markDz('dz-vel', `✅ ${count} items loaded`);
+  const withReplens = items.filter(i => i.replens > 0).length;
+  const maxReplen   = items.reduce((m,i) => Math.max(m, i.replens||0), 0);
+  markDz('dz-vel', `✅ ${count} items · ${withReplens} with replens`);
   document.getElementById('vel-status').innerHTML =
     `<div class="alert a-suc">✅ <strong>${count} items</strong> loaded from velocity report.<br>
-     Velocity classes auto-assigned using 20/30/30/20 percentile splits on ORIG_ORDER_QTY (30-day picks).<br>
-     Item dimensions from Item Unit Length/Width/Height. Current slots from Display Location column.</div>`;
-  toast(`✅ Velocity: ${count} items loaded`);
+     Velocity A/B/C/D auto-assigned · Replen Tasks captured: <strong>${withReplens} items have replens</strong> (max: ${maxReplen})<br>
+     💡 The <strong>Replen Count</strong> drop zone below is not needed — Repln Tasks is already in this file.</div>`;
+  toast(`✅ Velocity: ${count} items, ${withReplens} with replen counts`);
 }
 
 // --- 2. DISCO / ZERO INVENTORY REPORT ---
@@ -1313,7 +1315,13 @@ async function parseReplen(rows) {
     const cntRaw = countKey ? (r[countKey] || '0') : '0';
     const cnt = parseFloat(cntRaw.toString().replace(/,/g,'').trim()) || 0;
 
-    let item = sku ? items.find(i => i.sku === sku) : null;
+    let item = null;
+    if (sku) {
+      // Try matching on sku (item1), then barcode, then item_desc
+      item = items.find(i => i.sku === sku)
+          || items.find(i => i.barcode === sku)
+          || items.find(i => i.item_desc === sku);
+    }
     if (!item && locId) {
       const loc = locations.find(l => l.id === locId);
       if (loc && loc.sku) { item = items.find(i => i.sku === loc.sku); if (item) locMatched++; }
@@ -1333,7 +1341,7 @@ async function parseReplen(rows) {
         <strong>SKU column used:</strong> <code>${skuKey || 'NONE DETECTED'}</code> &nbsp; Sample values: ${topSkus}<br>
         <strong>Count column used:</strong> <code>${countKey || 'NONE DETECTED'}</code> &nbsp; Sample values: ${topCounts}<br>
         <strong>Items in DB to match against:</strong> ${items.length} &nbsp;|&nbsp; Sample SKUs: ${items.slice(0,3).map(i=>i.sku).join(', ')}<br>
-        ${matched === 0 ? '<span style="color:#dc2626">⚠️ If SKU column shows NONE or wrong values, the column names in this report do not match what the tool expects. The standalone replen report item column must match the <strong>Item1</strong> values from the velocity report.</span>' : ''}
+        ${matched === 0 ? '<span style="color:#dc2626">⚠️ If SKU column shows NONE or wrong values, the column names in this report do not match what the tool expects. The standalone replen report's item column must match the <strong>Item1</strong> values from the velocity report.</span>' : ''}
       </div>
     </details>`;
 
@@ -1640,7 +1648,7 @@ function renderSlotting() {
     .filter(r =>
       !search ||
       r.item.sku.toLowerCase().includes(search) ||
-      (r.item.desc || '').toLowerCase().includes(search)
+      (r.item.item_desc || '').toLowerCase().includes(search)
     );
 
   if (!filtered.length) {
@@ -1656,7 +1664,7 @@ function renderSlotting() {
       const scColor = sc >= 75 ? '#16a34a' : sc >= 50 ? '#d97706' : '#dc2626';
       return `<tr class="${rc}">
         <td><strong>${item.sku}</strong>${item.barcode ? `<br><span class="txt-sm txt-muted">${item.barcode}</span>` : ''}</td>
-        <td>${item.desc}${item.crushable === 'Y' ? ' <span class="badge b-fragile">🫧</span>' : ''}</td>
+        <td>${item.item_desc}${item.crushable === 'Y' ? ' <span class="badge b-fragile">🫧</span>' : ''}</td>
         <td><span class="badge b-${item.velocity || 'D'}">${item.velocity || '?'}</span>
             <br><span class="txt-sm txt-muted">${(item.picks30||0).toLocaleString()} picks</span></td>
         <td>${item.icube || '—'} ft³
@@ -1696,7 +1704,7 @@ function openAssign(sku) {
   const item = items.find(i => i.sku === sku);
   document.getElementById('assign-info').innerHTML =
     `<div class="flex gap8 ic fw">
-       <strong>${sku}</strong> — ${item.desc}
+       <strong>${sku}</strong> — ${item.item_desc}
        <span class="badge b-${item.velocity||'D'}">${item.velocity||'?'} velocity</span>
        ${item.crushable === 'Y' ? '<span class="badge b-fragile">🫧 Fragile</span>' : ''}
        <span class="chip">${item.icube || '?'} ft³ item cube</span>
@@ -1752,7 +1760,7 @@ function exportSlottingCSV() {
   items.forEach(item => {
     const loc = locations.find(l => l.sku === item.sku);
     const score = loc ? scorePlacement(item, loc) : '';
-    rows.push([item.sku, item.desc, item.velocity||'', item.picks30||'',
+    rows.push([item.sku, item.item_desc, item.velocity||'', item.picks30||'',
                item.icube||'', item.l||'', item.w||'', item.h||'',
                item.crushable, loc?.id||'UNSLOTTED', loc?.zone||'', loc?.type||'',
                loc?.cube||'', score, item.replens||'']);
@@ -1796,7 +1804,7 @@ function renderReplens() {
     const rc = item.replens >= 20 ? '#dc2626' : item.replens >= 10 ? '#d97706' : '#5b21b6';
     return `<tr class="row-repl">
       <td><strong>${item.sku}</strong></td>
-      <td>${item.desc}</td>
+      <td>${item.item_desc}</td>
       <td>${curLoc ? `<span class="chip">${curLoc.id}</span>` : '<span class="txt-muted">—</span>'}</td>
       <td>${curLoc ? `<span class="badge b-${curLoc.zone}">${zoneIcon(curLoc.zone)}</span>` : '—'}</td>
       <td>${curLoc?.cube || '—'}</td>
@@ -1820,7 +1828,7 @@ function exportReplCSV() {
     const loc  = locations.find(l => l.sku === item.sku);
     const fill = (loc && loc.cube > 0 && item.icube > 0)
       ? Math.round(item.icube / loc.cube * 100) : '';
-    rows.push([item.sku, item.desc, loc?.id||'', loc?.cube||'',
+    rows.push([item.sku, item.item_desc, loc?.id||'', loc?.cube||'',
                item.icube||'', fill, item.replens||'']);
   });
   dl(rows.map(r => r.join(',')).join('\n'), 'slotiq_replen_alerts.csv');
@@ -1831,7 +1839,7 @@ function exportReplCSV() {
 // ═══════════════════════════════════════════════════════
 function runNewItem() {
   const sku   = document.getElementById('ni-sku').value.trim();
-  const desc  = document.getElementById('ni-desc').value.trim();
+  const item_desc = document.getElementById('ni-desc').value.trim();
   const l     = +document.getElementById('ni-l').value;
   const w     = +document.getElementById('ni-w').value;
   const h     = +document.getElementById('ni-h').value;
@@ -1841,7 +1849,7 @@ function runNewItem() {
   if (!sku || !l || !w || !h) { alert('Enter SKU and all three dimensions.'); return; }
 
   const ic   = itemCube(l, w, h);
-  const item = { sku, desc, l, w, h, icube: ic, velocity: vel, crushable: crush };
+  const item = { sku, item_desc, l, w, h, icube: ic, velocity: vel, crushable: crush };
   const compat = locations.filter(lc => !lc.sku && isCompatible(item, lc))
                           .sort((a, b) => scorePlacement(item, b) - scorePlacement(item, a));
   const top3 = compat.slice(0, 3);
@@ -1879,7 +1887,7 @@ function runNewItem() {
         </div>
         ${i === 0
           ? `<button class="btn btn-pri" style="width:100%;margin-top:12px"
-               onclick="assignNew('${sku}','${(desc||sku).replace(/'/g,"\\'")}',${l},${w},${h},'${vel}','${crush}','${loc.id}')">
+               onclick="assignNew('${sku}','${(item_desc||sku).replace(/'/g,"\\'")}',${l},${w},${h},'${vel}','${crush}','${loc.id}')">
                Assign This Slot →</button>` : ''}
       </div>`;
     });
@@ -1899,10 +1907,10 @@ function runNewItem() {
   document.getElementById('ni-results').innerHTML = html;
 }
 
-function assignNew(sku, desc, l, w, h, vel, crush, locId) {
+function assignNew(sku, item_desc, l, w, h, vel, crush, locId) {
   const ic = itemCube(l, w, h);
   if (!items.find(i => i.sku === sku))
-    items.push({ sku, desc, l, w, h, icube: ic, velocity: vel, crushable: crush, picks30: 0, replens: 0 });
+    items.push({ sku, item_desc, l, w, h, icube: ic, velocity: vel, crushable: crush, picks30: 0, replens: 0 });
   const loc = locations.find(lc => lc.id === locId);
   if (loc) loc.sku = sku;
   persist(); toast(`✅ ${sku} → ${locId}`); showPage('slotting');
