@@ -1341,7 +1341,7 @@ async function parseReplen(rows) {
         <strong>SKU column used:</strong> <code>${skuKey || 'NONE DETECTED'}</code> &nbsp; Sample values: ${topSkus}<br>
         <strong>Count column used:</strong> <code>${countKey || 'NONE DETECTED'}</code> &nbsp; Sample values: ${topCounts}<br>
         <strong>Items in DB to match against:</strong> ${items.length} &nbsp;|&nbsp; Sample SKUs: ${items.slice(0,3).map(i=>i.sku).join(', ')}<br>
-        ${matched === 0 ? '<span style="color:#dc2626">⚠️ If SKU column shows NONE or wrong values, the column names in this report do not match what the tool expects. The standalone replen report's item column must match the <strong>Item1</strong> values from the velocity report.</span>' : ''}
+        ${matched === 0 ? '<span style="color:#dc2626">⚠️ If SKU column shows NONE or wrong values, the column names in this report do not match what the tool expects. The standalone replen report item column must match the <strong>Item1</strong> values from the velocity report.</span>' : ''}
       </div>
     </details>`;
 
