@@ -447,6 +447,7 @@ Location or SKU    Replen_Count (30-day total)</pre>
       </div>
     </div>
     <div id="slot-chips" class="flex gap8 ic fw" style="margin-bottom:12px"></div>
+    <div id="pallet-banner" style="display:none;margin-bottom:12px;padding:10px 14px;background:#f0f9ff;border:1px solid #7dd3fc;border-radius:8px;font-size:13px"></div>
     <div class="tw">
       <table>
         <thead><tr>
@@ -584,8 +585,8 @@ Location or SKU    Replen_Count (30-day total)</pre>
 // ═══════════════════════════════════════════════════════
 // 👇 Replace these two values with your own from Supabase dashboard
 //    Project Settings → API → Project URL and anon public key
-const SUPABASE_URL  = 'https://ebwtjqzrwkycbnmhsulv.supabase.co';
-const SUPABASE_ANON = 'sb_publishable_dlSlJlh4bJSsqajG4dlfxA_YmXy5t8r';
+const SUPABASE_URL  = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON = 'YOUR_SUPABASE_ANON_KEY';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
@@ -1001,7 +1002,7 @@ function isCompatible(item, loc) {
   if (item.crushable === 'Y' && loc.type !== 'crushable') return false;
   if (item.crushable !== 'Y' && loc.type === 'crushable') return false;
   // Pallet flow = A/B only; Small bin = C/D only
-  if (loc.type === 'pallet'    && !['A','B'].includes(item.velocity)) return false;
+  if (loc.type === 'pallet'    && item.velocity !== 'A') return false;  // pallet = A-velocity only
   if (loc.type === 'small_bin' && !['C','D'].includes(item.velocity)) return false;
   // Item must physically fit (item cube ≤ usable loc cube)
   if (item.icube > 0 && loc.cube > 0 && item.icube > loc.cube) return false;
@@ -1024,16 +1025,47 @@ function scorePlacement(item, loc) {
     else score += Math.max(0, 35 - Math.round((ratio - 0.90) * 100));
   }
   // Type bonus  0–25 pts
-  if (['A','B'].includes(item.velocity) && loc.type === 'pallet')    score += 25;
+  if (item.velocity === 'A' && loc.type === 'pallet') score += 25;  // pallet = A only
   else if (['C','D'].includes(item.velocity) && loc.type === 'small_bin') score += 20;
   else if (loc.type === 'standard') score += 10;
   return Math.min(100, Math.round(score));
 }
 
+// Volume movement = picks × item cube (cubic feet moved per 30 days)
+// Used to rank which A-items deserve pallet locations
+function volMove(item) {
+  return (item.picks30 || 0) * (item.icube || 0);
+}
+
+// Items ranked by volume movement — used to gate pallet location assignment
+function palletEligible(item) {
+  if (item.velocity !== 'A') return false;
+  // Item must be in the top half of A-items by volume movement
+  const aItems = items.filter(i => i.velocity === 'A');
+  if (!aItems.length) return true;
+  const myVol = volMove(item);
+  const ranked = [...aItems].sort((a, b) => volMove(b) - volMove(a));
+  const myRank = ranked.findIndex(i => i.sku === item.sku);
+  // Top 50% of A-items are pallet eligible (configurable via threshold)
+  return myRank < Math.ceil(ranked.length * 0.5);
+}
+
 function findBestLoc(item) {
-  const compat = locations.filter(l => !l.sku && isCompatible(item, l));
+  const compat = locations.filter(l => {
+    if (l.sku && l.sku !== item.sku) return false;  // already assigned to someone else
+    if (l.type === 'pallet' && !palletEligible(item)) return false;  // pallet gate
+    return isCompatible(item, l);
+  });
   if (!compat.length) return null;
-  compat.sort((a, b) => scorePlacement(item, b) - scorePlacement(item, a));
+  // Sort by score; for pallet locations also weight volume movement
+  compat.sort((a, b) => {
+    const sa = scorePlacement(item, a);
+    const sb2 = scorePlacement(item, b);
+    if (sa !== sb2) return sb2 - sa;
+    // Tiebreak on volume movement for pallet locs
+    if (a.type === 'pallet' || b.type === 'pallet') return volMove(item) > 0 ? -1 : 0;
+    return 0;
+  });
   return compat[0];
 }
 
@@ -1406,7 +1438,7 @@ async function parseReplen(rows) {
         <strong>SKU column used:</strong> <code>${skuKey || 'NONE DETECTED'}</code> &nbsp; Sample values: ${topSkus}<br>
         <strong>Count column used:</strong> <code>${countKey || 'NONE DETECTED'}</code> &nbsp; Sample values: ${topCounts}<br>
         <strong>Items in DB to match against:</strong> ${items.length} &nbsp;|&nbsp; Sample SKUs: ${items.slice(0,3).map(i=>i.sku).join(', ')}<br>
-        ${matched === 0 ? '<span style="color:#dc2626">⚠️ If SKU column shows NONE or wrong values, the column names in this report do not match what the tool expects. The standalone replen report item column must match the <strong>Item1</strong> values from the velocity report.</span>' : ''}
+        ${matched === 0 ? '<span style="color:#dc2626">⚠️ If SKU column shows NONE or wrong values, the column names in this report do not match what the tool expects. The standalone replen report's item column must match the <strong>Item1</strong> values from the velocity report.</span>' : ''}
       </div>
     </details>`;
 
@@ -1695,6 +1727,20 @@ function renderSlotting() {
   const unslotN = rows.filter(r => !r.curLoc).length;
   const replN   = rows.filter(r => r.repl >= 10).length;
 
+  // Pallet location summary banner
+  const palletLocs  = locations.filter(l => l.type === 'pallet');
+  const palletUsed  = palletLocs.filter(l => l.sku).length;
+  const topPallet   = items.filter(i => i.velocity === 'A')
+    .sort((a,b) => volMove(b) - volMove(a)).slice(0, 3)
+    .map(i => `${i.sku} (${(volMove(i)).toFixed(2)} ft³/30d)`).join(' · ');
+  const palletBanner = document.getElementById('pallet-banner');
+  if (palletLocs.length) {
+    palletBanner.style.display = 'block';
+    palletBanner.innerHTML = `🏗️ <strong>Pallet Flow:</strong> ${palletUsed}/${palletLocs.length} slots filled · A-items only · ranked by volume movement (picks × cube) · Top candidates: <span style="color:#1e40af">${topPallet || 'none yet'}</span>`;
+  } else {
+    palletBanner.style.display = 'none';
+  }
+
   document.getElementById('slot-chips').innerHTML =
     `<span class="chip">📦 ${items.length} items</span>
      <span class="chip" style="background:#fffbeb">🔄 ${reslotN} re-slot suggestions</span>
@@ -1755,9 +1801,13 @@ function renderSlotting() {
   ).join('');
 }
 
-async function autoSlotAll() {
+async async function autoSlotAll() {
   let n = 0;
-  items.filter(i => !locations.find(l => l.sku === i.sku)).forEach(item => {
+  // Sort by volume movement descending so highest-volume A-items claim pallet locs first
+  const unslotted = items
+    .filter(i => !locations.find(l => l.sku === i.sku))
+    .sort((a, b) => volMove(b) - volMove(a));
+  unslotted.forEach(item => {
     const best = findBestLoc(item);
     if (best) { best.sku = item.sku; n++; }
   });
