@@ -585,8 +585,8 @@ Location or SKU    Replen_Count (30-day total)</pre>
 // ═══════════════════════════════════════════════════════
 // 👇 Replace these two values with your own from Supabase dashboard
 //    Project Settings → API → Project URL and anon public key
-const SUPABASE_URL  = 'https://ebwtjqzrwkycbnmhsulv.supabase.co';
-const SUPABASE_ANON = 'sb_publishable_dlSlJlh4bJSsqajG4dlfxA_YmXy5t8r';
+const SUPABASE_URL  = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON = 'YOUR_SUPABASE_ANON_KEY';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
@@ -601,6 +601,13 @@ let charts     = {};
 let editLocIdx = null;
 let assignSku  = null;
 let _saveTimer = null;   // debounce handle for location/item saves
+
+// ── Slotting cache ────────────────────────────────────────────
+// Pre-computed per item after every import or assignment change.
+// renderSlotting() reads from this instead of recalculating.
+let _slotCache      = [];   // [{item, curLoc, bestLoc, curScore, bestScore, needsReslot, repl}]
+let _cacheValid     = false;
+let _palletEligSet  = null; // Set of SKUs eligible for pallet locations
 
 const UTIL_FACTOR = 0.55;
 
@@ -661,6 +668,7 @@ async function loadFromSupabase() {
     setDbStatus('ok', `Live · ${locations.length.toLocaleString()} locs · ${items.length.toLocaleString()} items`);
     loadRulesToDOM();
     updateSummary();
+    _cacheValid = false;          // will rebuild on first visit to Slotting tab
     renderDashboard();
   } catch(e) {
     console.error('Supabase load error:', e);
@@ -1037,17 +1045,19 @@ function volMove(item) {
   return (item.picks30 || 0) * (item.icube || 0);
 }
 
-// Items ranked by volume movement — used to gate pallet location assignment
+// Build the pallet-eligible set once (top 50% of A-items by volume movement)
+function buildPalletEligSet() {
+  const aItems = items.filter(i => i.velocity === 'A');
+  if (!aItems.length) { _palletEligSet = new Set(); return; }
+  const ranked = [...aItems].sort((a, b) => volMove(b) - volMove(a));
+  const cutoff = Math.ceil(ranked.length * 0.5);
+  _palletEligSet = new Set(ranked.slice(0, cutoff).map(i => i.sku));
+}
+
 function palletEligible(item) {
   if (item.velocity !== 'A') return false;
-  // Item must be in the top half of A-items by volume movement
-  const aItems = items.filter(i => i.velocity === 'A');
-  if (!aItems.length) return true;
-  const myVol = volMove(item);
-  const ranked = [...aItems].sort((a, b) => volMove(b) - volMove(a));
-  const myRank = ranked.findIndex(i => i.sku === item.sku);
-  // Top 50% of A-items are pallet eligible (configurable via threshold)
-  return myRank < Math.ceil(ranked.length * 0.5);
+  if (!_palletEligSet) buildPalletEligSet();
+  return _palletEligSet.has(item.sku);
 }
 
 function findBestLoc(item) {
@@ -1236,6 +1246,7 @@ async function parseVelocity(rows) {
     count++;
   });
 
+  _cacheValid = false; _palletEligSet = null;
   await saveItems();
   const withReplens = items.filter(i => i.replens > 0).length;
   const maxReplen   = items.reduce((m,i) => Math.max(m, i.replens||0), 0);
@@ -1287,6 +1298,7 @@ async function parseDisco(rows) {
 
   const total = freed + added;
   console.log('[Disco] freed existing:', freed, 'added new:', added);
+  _cacheValid = false;
   await saveLocations();
   await saveDiscoLocs();
   markDz('dz-disco', `✅ ${total} locations freed (${seen.size} unique)`);
@@ -1335,6 +1347,7 @@ async function parseOpen(rows) {
     }
   });
 
+  _cacheValid = false;
   await saveLocations();
   markDz('dz-open', `✅ ${added} new, ${updated} opened`);
   document.getElementById('open-status').innerHTML =
@@ -1438,7 +1451,7 @@ async function parseReplen(rows) {
         <strong>SKU column used:</strong> <code>${skuKey || 'NONE DETECTED'}</code> &nbsp; Sample values: ${topSkus}<br>
         <strong>Count column used:</strong> <code>${countKey || 'NONE DETECTED'}</code> &nbsp; Sample values: ${topCounts}<br>
         <strong>Items in DB to match against:</strong> ${items.length} &nbsp;|&nbsp; Sample SKUs: ${items.slice(0,3).map(i=>i.sku).join(', ')}<br>
-        ${matched === 0 ? '<span style="color:#dc2626">⚠️ If SKU column shows NONE or wrong values, the column names in this report do not match what the tool expects. The standalone replen report item column must match the <strong>Item1</strong> values from the velocity report.</span>' : ''}
+        ${matched === 0 ? '<span style="color:#dc2626">⚠️ If SKU column shows NONE or wrong values, the column names in this report do not match what the tool expects. The standalone replen report's item column must match the <strong>Item1</strong> values from the velocity report.</span>' : ''}
       </div>
     </details>`;
 
@@ -1497,6 +1510,7 @@ async function parseLocSeed(rows) {
     }
   });
 
+  _cacheValid = false;
   await saveLocations();
   markDz('dz-locs', `✅ ${added} seeded, ${updated} updated`);
   document.getElementById('locs-seed-status').innerHTML =
@@ -1543,6 +1557,7 @@ async function reapplyZoneRules() {
       updated++;
     }
   });
+  _cacheValid = false;
   await saveLocations();
   renderLocations();
   toast(`↺ Zone rules re-applied — ${updated} locations updated`);
@@ -1702,6 +1717,71 @@ function closeModal(id) { document.getElementById(id).classList.remove('open'); 
 // ═══════════════════════════════════════════════════════
 // SLOTTING ENGINE
 // ═══════════════════════════════════════════════════════
+// Build a fast lookup: locId → location object
+function buildLocMap() {
+  const m = new Map();
+  locations.forEach(l => m.set(l.id, l));
+  return m;
+}
+
+// Build the slot cache — call this after any import, assignment, or zone change
+function buildSlotCache() {
+  _palletEligSet = null;          // reset pallet elig so it rebuilds
+  buildPalletEligSet();           // pre-build now
+
+  // Index: sku → location (for fast curLoc lookup)
+  const skuToLoc = new Map();
+  locations.forEach(l => { if (l.sku) skuToLoc.set(l.sku, l); });
+
+  // Open locations grouped by type for fast filtering
+  const openByType = { pallet:[], small_bin:[], crushable:[], standard:[], all:[] };
+  locations.forEach(l => {
+    if (!l.sku) {
+      openByType.all.push(l);
+      (openByType[l.type] = openByType[l.type] || []).push(l);
+    }
+  });
+
+  _slotCache = items.map(item => {
+    const curLoc  = skuToLoc.get(item.sku) || null;
+    const bestLoc = findBestLocFast(item, openByType, skuToLoc);
+    const curScore  = curLoc  ? scorePlacement(item, curLoc)  : 0;
+    const bestScore = bestLoc ? scorePlacement(item, bestLoc) : 0;
+    const needsReslot = !!(curLoc && bestLoc && bestLoc.id !== curLoc.id && (bestScore - curScore) >= 15);
+    return { item, curLoc, bestLoc, curScore, bestScore, needsReslot, repl: item.replens || 0 };
+  });
+
+  _cacheValid = true;
+}
+
+// Fast version of findBestLoc that uses pre-grouped open locations
+function findBestLocFast(item, openByType, skuToLoc) {
+  // Pick candidate pool — crushable items only see crushable locs; others never see crushable
+  let pool;
+  if (item.crushable === 'Y') {
+    pool = openByType['crushable'] || [];
+  } else if (item.velocity === 'A' && palletEligible(item)) {
+    // A-items: try pallet first, fall back to standard/gold
+    pool = [...(openByType['pallet'] || []), ...(openByType['standard'] || [])];
+  } else if (['C','D'].includes(item.velocity)) {
+    pool = [...(openByType['small_bin'] || []), ...(openByType['standard'] || [])];
+  } else {
+    pool = openByType['standard'] || [];
+  }
+
+  // Also consider the item's current location as a candidate (it may already be best)
+  const cur = skuToLoc.get(item.sku);
+  if (cur) pool = [cur, ...pool];
+
+  const compat = pool.filter(l => isCompatible(item, l));
+  if (!compat.length) return null;
+
+  // Only score top 50 candidates to avoid O(n) scoring over 9,000 locs
+  const candidates = compat.slice(0, 50);
+  candidates.sort((a, b) => scorePlacement(item, b) - scorePlacement(item, a));
+  return candidates[0];
+}
+
 function renderSlotting() {
   if (!items.length) {
     document.getElementById('slot-alert').style.display = 'block';
@@ -1714,14 +1794,9 @@ function renderSlotting() {
   const search = (document.getElementById('slot-search')?.value || '').toLowerCase();
   const filt   = document.getElementById('slot-filter')?.value || 'all';
 
-  const rows = items.map(item => {
-    const curLoc   = locations.find(l => l.sku === item.sku);
-    const bestLoc  = findBestLoc(item);
-    const curScore = curLoc  ? scorePlacement(item, curLoc)  : 0;
-    const bestScore= bestLoc ? scorePlacement(item, bestLoc) : 0;
-    const needsReslot = curLoc && bestLoc && bestLoc.id !== curLoc.id && (bestScore - curScore) >= 15;
-    return { item, curLoc, bestLoc, curScore, bestScore, needsReslot, repl: item.replens || 0 };
-  });
+  // Use pre-computed cache; rebuild only if stale
+  if (!_cacheValid || _slotCache.length !== items.length) buildSlotCache();
+  const rows = _slotCache;
 
   const reslotN = rows.filter(r => r.needsReslot).length;
   const unslotN = rows.filter(r => !r.curLoc).length;
@@ -1811,7 +1886,7 @@ async function autoSlotAll() {
     const best = findBestLoc(item);
     if (best) { best.sku = item.sku; n++; }
   });
-  await persistNow(); renderSlotting(); toast(`⚡ Auto-slotted ${n} items`);
+  _cacheValid = false; await persistNow(); renderSlotting(); toast(`⚡ Auto-slotted ${n} items`);
 }
 
 function openAssign(sku) {
@@ -1856,7 +1931,7 @@ function confirmAssign() {
   loc.sku = assignSku;
   const item = items.find(i => i.sku === assignSku);
   if (item) item.slot = locId;
-  persist(); closeModal('modal-assign'); renderSlotting();
+  _cacheValid = false; persist(); closeModal('modal-assign'); renderSlotting();
   toast(`✅ ${assignSku} → ${locId}`);
   saveItems(); saveLocations();
 }
@@ -1864,7 +1939,7 @@ function confirmAssign() {
 function unassign(sku) {
   const loc = locations.find(l => l.sku === sku);
   if (loc) loc.sku = null;
-  persist(); renderSlotting();
+  _cacheValid = false; persist(); renderSlotting();
   toast(`🗑️ ${sku} unassigned`);
   saveItems(); saveLocations();
 }
@@ -2256,7 +2331,7 @@ async function clearAllData() {
     }, { onConflict:'id' });
 
     // Reset in-memory state
-    locations = []; items = []; discoLocs = [];
+    locations = []; items = []; discoLocs = []; _slotCache = []; _cacheValid = false; _palletEligSet = null;
     zoneRules = { gold:'FA:C', silver:'FA:B', bronze:'FA:A', pallet:'DD', small:'', crush:'' };
 
     // Reset all drop zones
