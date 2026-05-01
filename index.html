@@ -65,6 +65,7 @@ label{display:block;font-size:12px;font-weight:500;color:var(--muted);margin-bot
 .b-bad{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;}
 .b-repl{background:#ede9fe;color:#5b21b6;border:1px solid #c4b5fd;}
 .b-fragile{background:#fdf4ff;color:#7c3aed;border:1px solid #d8b4fe;}
+.b-rtd{background:#f0f9ff;color:#0369a1;border:1px solid #7dd3fc;}
 .tw{overflow-x:auto;border-radius:8px;border:1px solid var(--bdr);}
 table{width:100%;border-collapse:collapse;font-size:13px;}
 th{background:#f8fafc;font-weight:600;padding:10px 12px;text-align:left;border-bottom:1px solid var(--bdr);color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;}
@@ -205,10 +206,11 @@ pre{background:#f8fafc;padding:12px;border-radius:6px;font-size:11px;border:1px 
         <div><label>Rule(s) → Silver zone</label><input id="rule-silver" placeholder="FA:B, FB:B" onchange="saveRulesFromDOM()"></div>
         <div><label>Rule(s) → Bronze zone</label><input id="rule-bronze" placeholder="FA:A, FB:A" onchange="saveRulesFromDOM()"></div>
       </div>
-      <div class="fr fr3">
+      <div class="fr fr4">
         <div><label>Rule(s) → Pallet Flow type (AREA or AREA:AISLE or AREA:AISLE:BAY-BAY)</label><input id="rule-pallet" placeholder="DD, FA:52:01-20" onchange="saveRulesFromDOM()"></div>
         <div><label>Rule(s) → Small Bin type</label><input id="rule-small" placeholder="SB, FA:10:01-30" onchange="saveRulesFromDOM()"></div>
         <div><label>Rule(s) → Crushable / Fragile type</label><input id="rule-crush" placeholder="FA:09:01-10, FA:10:05-15" onchange="saveRulesFromDOM()"></div>
+        <div><label>Rule(s) → RTD (Ready to Drink) type</label><input id="rule-rtd" placeholder="RTD, FA:15" onchange="saveRulesFromDOM()"></div>
       </div>
       <div class="flex gap8 ic" style="margin-top:8px">
         <button class="btn btn-warn" onclick="saveRulesFromDOM();reapplyZoneRules()">↺ Re-apply Rules to All Locations</button>
@@ -235,7 +237,7 @@ pre{background:#f8fafc;padding:12px;border-radius:6px;font-size:11px;border:1px 
       </div>
       <div class="fr fr5">
         <div><label>Zone</label><select id="b-zone"><option value="gold">🥇 Gold</option><option value="silver" selected>🥈 Silver</option><option value="bronze">🥉 Bronze</option></select></div>
-        <div><label>Type</label><select id="b-type"><option value="standard">Standard</option><option value="pallet">Pallet Flow</option><option value="small_bin">Small Bin</option><option value="crushable">Crushable</option></select></div>
+        <div><label>Type</label><select id="b-type"><option value="standard">Standard</option><option value="pallet">Pallet Flow</option><option value="small_bin">Small Bin</option><option value="crushable">Crushable</option><option value="rtd">🥤 RTD</option></select></div>
         <div><label>Length (in)</label><input id="b-l" type="number" value="48"></div>
         <div><label>Width (in)</label><input id="b-w" type="number" value="48"></div>
         <div><label>Height (in)</label><input id="b-h" type="number" value="36"></div>
@@ -516,6 +518,9 @@ Location or SKU    Replen_Count (30-day total)</pre>
         <div><label>Crushable / Fragile?</label>
           <select id="ni-crush"><option value="N">No</option><option value="Y">Yes — fragile</option></select>
         </div>
+        <div><label>RTD (Ready to Drink)?</label>
+          <select id="ni-rtd"><option value="N">No</option><option value="Y">Yes — RTD item</option></select>
+        </div>
       </div>
       <div class="fr"><div><label>Merch Group (optional)</label><input id="ni-mg" placeholder="e.g. OTG / CASHWRAP"></div></div>
       <button class="btn btn-pri" style="width:100%" onclick="runNewItem()">Get Recommendations →</button>
@@ -549,7 +554,7 @@ Location or SKU    Replen_Count (30-day total)</pre>
     </div>
     <div class="fr fr2">
       <div><label>Zone</label><select id="ml-zone"><option value="gold">🥇 Gold</option><option value="silver">🥈 Silver</option><option value="bronze">🥉 Bronze</option></select></div>
-      <div><label>Type</label><select id="ml-type"><option value="standard">Standard</option><option value="pallet">Pallet Flow</option><option value="small_bin">Small Bin</option><option value="crushable">Crushable</option></select></div>
+      <div><label>Type</label><select id="ml-type"><option value="standard">Standard</option><option value="pallet">Pallet Flow</option><option value="small_bin">Small Bin</option><option value="crushable">Crushable</option><option value="rtd">🥤 RTD</option></select></div>
     </div>
     <div class="fr fr3">
       <div><label>Length (in)</label><input id="ml-l" type="number"></div>
@@ -596,7 +601,7 @@ const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 let locations  = [];
 let items      = [];
 let discoLocs  = [];
-let zoneRules  = { gold:'FA:C', silver:'FA:B', bronze:'FA:A', pallet:'DD', small:'', crush:'' };
+let zoneRules  = { gold:'FA:C', silver:'FA:B', bronze:'FA:A', pallet:'DD', small:'', crush:'', rtd:'' };
 let charts     = {};
 let editLocIdx = null;
 let assignSku  = null;
@@ -661,7 +666,8 @@ async function loadFromSupabase() {
         bronze: ruleRes.data.bronze || '',
         pallet: ruleRes.data.pallet || '',
         small:  ruleRes.data.small  || '',
-        crush:  ruleRes.data.crush  || ''
+        crush:  ruleRes.data.crush  || '',
+        rtd:    ruleRes.data.rtd    || ''
       };
     }
 
@@ -698,6 +704,7 @@ function sanitizeItem(item) {
     h:         +item.h        || 0,
     icube:     +item.icube    || 0,
     crushable: item.crushable || 'N',
+    rtd:       item.rtd       || 'N',
     velocity:  item.velocity  || null,
     picks30:   +item.picks30  || 0,
     dispLoc:   item.dispLoc   || item.slot || null,
@@ -765,7 +772,7 @@ async function saveItems() {
 async function saveZoneRules() {
   try {
     const { error } = await sb.from('zone_rules')
-      .upsert({ id: 1, ...zoneRules }, { onConflict: 'id' });
+      .upsert({ id: 1, gold: zoneRules.gold, silver: zoneRules.silver, bronze: zoneRules.bronze, pallet: zoneRules.pallet, small: zoneRules.small, crush: zoneRules.crush, rtd: zoneRules.rtd }, { onConflict: 'id' });
     if (error) throw error;
   } catch(e) {
     console.error('saveZoneRules error:', e);
@@ -815,7 +822,7 @@ async function clearLocationsFromDb() {
 
 // ── Zone rule DOM sync ────────────────────────────────────
 function saveRulesFromDOM() {
-  const ids = ['gold','silver','bronze','pallet','small','crush'];
+  const ids = ['gold','silver','bronze','pallet','small','crush','rtd'];
   ids.forEach(id => {
     const el = document.getElementById('rule-' + id);
     if (el) zoneRules[id] = el.value;
@@ -824,7 +831,7 @@ function saveRulesFromDOM() {
 }
 
 function loadRulesToDOM() {
-  const ids = ['gold','silver','bronze','pallet','small','crush'];
+  const ids = ['gold','silver','bronze','pallet','small','crush','rtd'];
   ids.forEach(id => {
     const el = document.getElementById('rule-' + id);
     if (el && zoneRules[id] !== undefined) el.value = zoneRules[id];
@@ -892,7 +899,7 @@ function zoneIcon(z)  { return {gold:'🥇',silver:'🥈',bronze:'🥉'}[z] || '
 function cap(s)       { return s.charAt(0).toUpperCase() + s.slice(1); }
 function typeLbl(t)   {
   return {standard:'📦 Standard',pallet:'🏗️ Pallet Flow',
-          small_bin:'🗂️ Small Bin',crushable:'🫧 Crushable'}[t] || t;
+          small_bin:'🗂️ Small Bin',crushable:'🫧 Crushable',rtd:'🥤 RTD'}[t] || t;
 }
 
 function getRule(id) {
@@ -986,10 +993,11 @@ function autoZone(locId, area) {
   const silvR  = getRuleWithLevel('rule-silver');
   const bronR  = getRuleWithLevel('rule-bronze');
 
-  // Type uses AREA:AISLE:BAY-RANGE rules (pallet/small/crushable)
+  // Type uses AREA:AISLE:BAY-RANGE rules (pallet/small/crushable/rtd)
   const pallR  = parseTypeRules(zoneRules['pallet'] || '');
   const smR    = parseTypeRules(zoneRules['small']  || '');
   const crR    = parseTypeRules(zoneRules['crush']  || '');
+  const rtdR   = parseTypeRules(zoneRules['rtd']    || '');
 
   let zone = 'silver', type = 'standard';
   if      (matchesRule(goldR, a, level)) zone = 'gold';
@@ -997,6 +1005,7 @@ function autoZone(locId, area) {
   else if (matchesRule(bronR, a, level)) zone = 'bronze';
 
   if      (matchesTypeRule(crR,   a, aisle, bay)) type = 'crushable';
+  else if (matchesTypeRule(rtdR,  a, aisle, bay)) type = 'rtd';
   else if (matchesTypeRule(pallR, a, aisle, bay)) type = 'pallet';
   else if (matchesTypeRule(smR,   a, aisle, bay)) type = 'small_bin';
   return { zone, type };
@@ -1009,6 +1018,8 @@ function isCompatible(item, loc) {
   // Crushable items MUST go to crushable zone, and non-crushable MUST NOT
   if (item.crushable === 'Y' && loc.type !== 'crushable') return false;
   if (item.crushable !== 'Y' && loc.type === 'crushable') return false;
+  if (item.rtd === 'Y' && loc.type !== 'rtd') return false;   // RTD items → RTD locs only
+  if (item.rtd !== 'Y' && loc.type === 'rtd') return false;   // RTD locs → RTD items only
   // Pallet flow = A/B only; Small bin = C/D only
   if (loc.type === 'pallet'    && item.velocity !== 'A') return false;  // pallet = A-velocity only
   if (loc.type === 'small_bin' && !['C','D'].includes(item.velocity)) return false;
@@ -1034,6 +1045,7 @@ function scorePlacement(item, loc) {
   }
   // Type bonus  0–25 pts
   if (item.velocity === 'A' && loc.type === 'pallet') score += 25;  // pallet = A only
+  if (item.rtd === 'Y' && loc.type === 'rtd') score += 25;            // RTD match bonus
   else if (['C','D'].includes(item.velocity) && loc.type === 'small_bin') score += 20;
   else if (loc.type === 'standard') score += 10;
   return Math.min(100, Math.round(score));
@@ -1238,10 +1250,16 @@ async function parseVelocity(rows) {
       items.push(obj);
     }
 
-    // If item has a display location, link it in location DB
+    // Sync Display Location to location DB:
+    // 1. Clear the SKU from any location that previously held this item (it moved)
+    // 2. Set the SKU on the Display Location (unless something else is there)
     if (dispLoc) {
-      const loc = locations.find(lc => lc.id === dispLoc);
-      if (loc && !loc.sku) loc.sku = sku;
+      // Remove stale assignment if item moved to a different slot
+      const prevLoc = locations.find(lc => lc.sku === sku && lc.id !== dispLoc);
+      if (prevLoc) prevLoc.sku = null;
+      // Assign to current Display Location
+      const curLoc = locations.find(lc => lc.id === dispLoc);
+      if (curLoc) curLoc.sku = sku;   // velocity is authoritative for occupied slots
     }
     count++;
   });
@@ -1336,7 +1354,9 @@ async function parseOpen(rows) {
 
     const existing = locations.find(lc => lc.id === locId);
     if (existing) {
-      existing.sku = null;  // it's open
+      // Preserve any SKU set by velocity import — velocity is authoritative for occupied slots.
+      // Open locations report only clears slots that aren't already linked to an item.
+      if (!existing.sku) existing.sku = null;
       if (l) { existing.l = l; existing.w = w; existing.h = h; existing.cube = cube; }
       if (workArea) existing.workArea = workArea;
       updated++;
@@ -1350,9 +1370,11 @@ async function parseOpen(rows) {
   _cacheValid = false;
   await saveLocations();
   markDz('dz-open', `✅ ${added} new, ${updated} opened`);
+  const preserved = locations.filter(l => l.sku).length;
   document.getElementById('open-status').innerHTML =
-    `<div class="alert a-suc">✅ <strong>${added} new locations</strong> added, <strong>${updated} existing locations</strong> marked open.<br>
-     Usable cube = L×W×H ÷ 1728 × 55% utilization factor. All are available for slotting.</div>`;
+    `<div class="alert a-suc">✅ <strong>${added} new locations</strong> added, <strong>${updated} updated</strong>.<br>
+     Locations with a velocity-assigned item were <strong>not</strong> cleared (${preserved} occupied slots preserved).<br>
+     Only slots with no velocity assignment were marked open.</div>`;
   toast(`✅ Open locations: ${added + updated} processed`);
 }
 
@@ -1734,7 +1756,7 @@ function buildSlotCache() {
   locations.forEach(l => { if (l.sku) skuToLoc.set(l.sku, l); });
 
   // Open locations grouped by type for fast filtering
-  const openByType = { pallet:[], small_bin:[], crushable:[], standard:[], all:[] };
+  const openByType = { pallet:[], small_bin:[], crushable:[], rtd:[], standard:[], all:[] };
   locations.forEach(l => {
     if (!l.sku) {
       openByType.all.push(l);
@@ -1760,6 +1782,8 @@ function findBestLocFast(item, openByType, skuToLoc) {
   let pool;
   if (item.crushable === 'Y') {
     pool = openByType['crushable'] || [];
+  } else if (item.rtd === 'Y') {
+    pool = openByType['rtd'] || [];
   } else if (item.velocity === 'A' && palletEligible(item)) {
     // A-items: try pallet first, fall back to standard/gold
     pool = [...(openByType['pallet'] || []), ...(openByType['standard'] || [])];
@@ -1850,7 +1874,7 @@ function renderSlotting() {
       const scColor = sc >= 75 ? '#16a34a' : sc >= 50 ? '#d97706' : '#dc2626';
       return `<tr class="${rc}">
         <td><strong>${item.sku}</strong>${item.barcode ? `<br><span class="txt-sm txt-muted">${item.barcode}</span>` : ''}</td>
-        <td>${item.item_desc}${item.crushable === 'Y' ? ' <span class="badge b-fragile">🫧</span>' : ''}</td>
+        <td>${item.item_desc}${item.crushable === 'Y' ? ' <span class="badge b-fragile">🫧</span>' : ''}${item.rtd === 'Y' ? ' <span class="badge" style="background:#f0f9ff;color:#0369a1;border:1px solid #7dd3fc">🥤</span>' : ''}</td>
         <td><span class="badge b-${item.velocity || 'D'}">${item.velocity || '?'}</span>
             <br><span class="txt-sm txt-muted">${(item.picks30||0).toLocaleString()} picks</span></td>
         <td>${item.icube || '—'} ft³
@@ -2035,11 +2059,12 @@ function runNewItem() {
   const h     = +document.getElementById('ni-h').value;
   const vel   = document.getElementById('ni-vel').value;
   const crush = document.getElementById('ni-crush').value;
+  const rtd   = document.getElementById('ni-rtd')?.value || 'N';
 
   if (!sku || !l || !w || !h) { alert('Enter SKU and all three dimensions.'); return; }
 
   const ic   = itemCube(l, w, h);
-  const item = { sku, item_desc, l, w, h, icube: ic, velocity: vel, crushable: crush };
+  const item = { sku, item_desc, l, w, h, icube: ic, velocity: vel, crushable: crush, rtd };
   const compat = locations.filter(lc => !lc.sku && isCompatible(item, lc))
                           .sort((a, b) => scorePlacement(item, b) - scorePlacement(item, a));
   const top3 = compat.slice(0, 3);
@@ -2125,12 +2150,18 @@ function renderDashboard() {
     return c && b && b.id !== c.id && scorePlacement(item, b) - scorePlacement(item, c) >= 15;
   }).length;
 
+  // Occupied = any location with a sku string (from seed or velocity)
+  // In velocity = locations whose sku matches an item record (full data available)
+  const inVelocity   = locations.filter(l => l.sku && items.find(i => i.sku === l.sku)).length;
+  const occupiedOnly = used - inVelocity;  // occupied but not in velocity report
+
   document.getElementById('dash-stats').innerHTML =
-    `<div class="sc"><div class="sc-lbl">Total Locations</div><div class="sc-val">${total.toLocaleString()}</div><div class="sc-sub">${total ? Math.round(used/total*100) : 0}% utilized</div></div>
-     <div class="sc"><div class="sc-lbl">Items Tracked</div><div class="sc-val">${items.length.toLocaleString()}</div></div>
+    `<div class="sc"><div class="sc-lbl">Total Locations</div><div class="sc-val">${total.toLocaleString()}</div><div class="sc-sub">${total ? Math.round(used/total*100) : 0}% occupied</div></div>
+     <div class="sc"><div class="sc-lbl">Occupied Locations</div><div class="sc-val">${used.toLocaleString()}</div><div class="sc-sub">${inVelocity.toLocaleString()} in velocity · ${occupiedOnly.toLocaleString()} not in velocity</div></div>
+     <div class="sc"><div class="sc-lbl">Velocity Items</div><div class="sc-val">${items.length.toLocaleString()}</div><div class="sc-sub">with picks/cube/replen data</div></div>
      <div class="sc"><div class="sc-lbl">Gold Zone Pick %</div><div class="sc-val" style="color:var(--gold)">${gp}%</div><div class="sc-sub">of all 30-day picks</div></div>
      <div class="sc"><div class="sc-lbl">A-Items in Gold</div><div class="sc-val" style="color:var(--suc)">${aItems.length ? Math.round(aInGold/aItems.length*100) : 0}%</div><div class="sc-sub">${aInGold} of ${aItems.length}</div></div>
-     <div class="sc"><div class="sc-lbl">Re-slot Candidates</div><div class="sc-val" style="color:${reslot>0?'var(--warn)':'var(--suc)'}">${reslot}</div><div class="sc-sub">+15pt improvement available</div></div>
+     <div class="sc"><div class="sc-lbl">Re-slot Candidates</div><div class="sc-val" style="color:${reslot>0?'var(--warn)':'var(--suc)'}">${reslot}</div><div class="sc-sub">velocity items only</div></div>
      <div class="sc"><div class="sc-lbl">High Replen Items</div><div class="sc-val" style="color:#7c3aed">${items.filter(i=>(i.replens||0)>=10).length}</div><div class="sc-sub">≥10 replens/30d</div></div>`;
 
   const zm = { gold: 0, silver: 0, bronze: 0 };
