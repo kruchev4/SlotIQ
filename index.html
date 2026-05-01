@@ -1769,7 +1769,17 @@ function buildSlotCache() {
     const bestLoc = findBestLocFast(item, openByType, skuToLoc);
     const curScore  = curLoc  ? scorePlacement(item, curLoc)  : 0;
     const bestScore = bestLoc ? scorePlacement(item, bestLoc) : 0;
-    const needsReslot = !!(curLoc && bestLoc && bestLoc.id !== curLoc.id && (bestScore - curScore) >= 15);
+    // Only flag as reslot if:
+    // 1. There IS a current location
+    // 2. The best location is genuinely different
+    // 3. The improvement is strictly > 15 points (not just equal)
+    // 4. The move is actually meaningful (different zone OR different type)
+    const meaningfulMove = bestLoc && curLoc && (
+      bestLoc.zone !== curLoc.zone || bestLoc.type !== curLoc.type
+    );
+    const needsReslot = !!(curLoc && bestLoc && bestLoc.id !== curLoc.id
+      && (bestScore - curScore) > 15
+      && meaningfulMove);
     return { item, curLoc, bestLoc, curScore, bestScore, needsReslot, repl: item.replens || 0 };
   });
 
@@ -1778,32 +1788,36 @@ function buildSlotCache() {
 
 // Fast version of findBestLoc that uses pre-grouped open locations
 function findBestLocFast(item, openByType, skuToLoc) {
-  // Pick candidate pool — crushable items only see crushable locs; others never see crushable
+  // Pick candidate pool by type
   let pool;
   if (item.crushable === 'Y') {
-    pool = openByType['crushable'] || [];
+    pool = [...(openByType['crushable'] || [])];
   } else if (item.rtd === 'Y') {
-    pool = openByType['rtd'] || [];
+    pool = [...(openByType['rtd'] || [])];
   } else if (item.velocity === 'A' && palletEligible(item)) {
-    // A-items: try pallet first, fall back to standard/gold
     pool = [...(openByType['pallet'] || []), ...(openByType['standard'] || [])];
   } else if (['C','D'].includes(item.velocity)) {
     pool = [...(openByType['small_bin'] || []), ...(openByType['standard'] || [])];
   } else {
-    pool = openByType['standard'] || [];
+    pool = [...(openByType['standard'] || [])];
   }
 
-  // Also consider the item's current location as a candidate (it may already be best)
+  // Always evaluate the current location — score it first so we can use it as baseline
   const cur = skuToLoc.get(item.sku);
-  if (cur) pool = [cur, ...pool];
+  const curScore = cur ? scorePlacement(item, cur) : -1;
 
-  const compat = pool.filter(l => isCompatible(item, l));
-  if (!compat.length) return null;
+  // Score top 50 open candidates
+  const compat = pool.filter(l => isCompatible(item, l)).slice(0, 50);
+  compat.sort((a, b) => scorePlacement(item, b) - scorePlacement(item, a));
 
-  // Only score top 50 candidates to avoid O(n) scoring over 9,000 locs
-  const candidates = compat.slice(0, 50);
-  candidates.sort((a, b) => scorePlacement(item, b) - scorePlacement(item, a));
-  return candidates[0];
+  const bestOpen = compat[0] || null;
+  const bestOpenScore = bestOpen ? scorePlacement(item, bestOpen) : -1;
+
+  // Only recommend a move if the open location is STRICTLY better than current
+  // by at least 1 point (the 15pt reslot threshold is applied separately in buildSlotCache)
+  // If tied or current is better, return current location as the "best"
+  if (cur && bestOpenScore <= curScore) return cur;
+  return bestOpen || cur || null;
 }
 
 function renderSlotting() {
