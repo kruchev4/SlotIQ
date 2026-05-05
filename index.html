@@ -1188,8 +1188,22 @@ async function parseReport(text, type) {
 //   Item Unit Length, Item Unit Width, Item Unit Height, Pack Weight,
 //   ON_HAND_QTY, ORIG_ORDER_QTY, Display Location
 async function parseVelocity(rows) {
-  // Reset replen counts on all existing items so stale data from a previous import
-  // never carries forward. The velocity report is the source of truth for replens.
+  // Build set of incoming SKUs (item_name values) from this report
+  const incomingSkus = new Set(rows.map(r => ffExact(r, ['item_name']) || '').filter(Boolean));
+
+  // Remove ghost items whose SKUs aren't in the incoming report.
+  // This cleans up old items keyed on Item1 values from before the SKU fix,
+  // and items that have been discontinued or removed from the velocity report.
+  const before = items.length;
+  items = items.filter(i => incomingSkus.has(i.sku));
+  const removed = before - items.length;
+  if (removed > 0) {
+    console.log(`[Velocity] Removed ${removed} stale items not in this report`);
+    // Also clear their location assignments
+    locations.forEach(l => { if (l.sku && !incomingSkus.has(l.sku)) l.sku = null; });
+  }
+
+  // Reset replen counts — velocity report is the source of truth
   items.forEach(i => { i.replens = 0; });
 
   // Gather all ORIG_ORDER_QTY values to compute velocity class thresholds
@@ -1279,6 +1293,7 @@ async function parseVelocity(rows) {
 
   _cacheValid = false; _palletEligSet = null;
   await saveItems();
+  await saveLocations();   // persist sku assignments set from Display Location
   const withReplens = items.filter(i => i.replens > 0).length;
   const maxReplen   = items.reduce((m,i) => Math.max(m, i.replens||0), 0);
   markDz('dz-vel', `✅ ${count} items · ${withReplens} with replens`);
