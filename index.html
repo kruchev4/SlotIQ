@@ -1205,9 +1205,11 @@ async function parseVelocity(rows) {
 
   let count = 0;
   rows.forEach(r => {
-    // 'Item1' is the SKU column (normalizes to 'item1')
-    // 'Item Name' is a secondary ID (normalizes to 'item_name')
-    const sku = ffExact(r, ['item1']) || ff(r, ['item_name','item','sku','part_no']);
+    // Column mapping:
+    //   Item1     = garbage/noise — IGNORED
+    //   Item Name = the actual SKU (e.g. 2697944) — this is the item identifier
+    //   Item Bar Code = barcode
+    const sku = ffExact(r, ['item_name']) || ff(r, ['item','sku','part_no']);
     if (!sku) return;
 
     const l = +ff(r, ['item_unit_length','unit_length','length','len']) || 0;
@@ -1234,7 +1236,8 @@ async function parseVelocity(rows) {
 
     const obj = {
       sku, barcode, mg, weight,
-      item_desc: ff(r, ['desc','description','item_desc']) || ffExact(r, ['item_name']) || sku,
+      // No human-readable description in this report — use SKU as display name
+      item_desc: ff(r, ['desc','description','item_desc']) || sku,
       l, w, h, icube: ic,
       crushable: existing?.crushable || 'N',  // velocity report has no crushable flag; preserve existing
       velocity:  vel,
@@ -1272,7 +1275,7 @@ async function parseVelocity(rows) {
   document.getElementById('vel-status').innerHTML =
     `<div class="alert a-suc">✅ <strong>${count} items</strong> loaded from velocity report.<br>
      Velocity A/B/C/D auto-assigned · Replen Tasks captured: <strong>${withReplens} items have replens</strong> (max: ${maxReplen})<br>
-     💡 The <strong>Replen Count</strong> drop zone below is not needed — Repln Tasks is already in this file.</div>`;
+     💡 <strong>Column mapping:</strong> Item Name = SKU · ORIG_ORDER_QTY = 30-day picks · Repln Tasks = replen count. Item1 column is ignored.</div>`;
   toast(`✅ Velocity: ${count} items, ${withReplens} with replen counts`);
 }
 
@@ -1398,7 +1401,7 @@ async function parseReplen(rows) {
     'total_replen','number_of_replens','total','qty_30d'
   ];
   const skipKeys = new Set([
-    'item1','item_name','item_bar_code','item','sku','barcode',
+    'item1','item_bar_code','item','sku','barcode',  // item_name is the SKU — NOT skipped
     'location','pick_loc','location_barcode','loc',
     'item_number','part_no','on_hand_qty','orig_order_qty',
     'max','min','volume','repln_qty','pack_weight',
@@ -1425,7 +1428,7 @@ async function parseReplen(rows) {
   let skuKey = null;
 
   // First: check known names
-  for (const k of ['item1','item_name','item','sku','part_no','item_number','barcode']) {
+  for (const k of ['item_name','item','sku','part_no','item_number','barcode']) {
     if (sampleKeys.includes(k)) { skuKey = k; break; }
   }
   // Second: if not found by name, find the key whose values match item SKUs
