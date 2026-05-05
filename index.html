@@ -1243,7 +1243,7 @@ async function parseVelocity(rows) {
       velocity:  vel,
       picks30:   picks,
       dispLoc,
-      slot:      existing?.slot || dispLoc || null,
+      slot:      dispLoc || existing?.slot || null,  // velocity dispLoc always wins
       replens:   replnTasks   // always overwrite — 0 if blank; capped at 9999
     };
 
@@ -1254,15 +1254,25 @@ async function parseVelocity(rows) {
     }
 
     // Sync Display Location to location DB:
-    // 1. Clear the SKU from any location that previously held this item (it moved)
-    // 2. Set the SKU on the Display Location (unless something else is there)
+    // Velocity report is the daily source of truth for what's slotted where.
+    // 1. Clear any previous location that had this SKU (item may have moved)
+    // 2. Stamp the Display Location with this SKU — always, overwriting stale seed data
+    // 3. Set item.slot so the item shows as "slotted" in the slotting engine
     if (dispLoc) {
-      // Remove stale assignment if item moved to a different slot
+      // Clear stale assignment if item moved slots since last import
       const prevLoc = locations.find(lc => lc.sku === sku && lc.id !== dispLoc);
       if (prevLoc) prevLoc.sku = null;
-      // Assign to current Display Location
+      // Always write the current Display Location — velocity overwrites seed data
       const curLoc = locations.find(lc => lc.id === dispLoc);
-      if (curLoc) curLoc.sku = sku;   // velocity is authoritative for occupied slots
+      if (curLoc) {
+        curLoc.sku = sku;   // authoritative — overwrites whatever seed put here
+      } else {
+        // Location not in DB yet (wasn't in seed) — add it as a basic placeholder
+        // Zone/type will be unknown until location report is imported
+        const area = dispLoc.substring(0, 2);
+        const { zone, type } = autoZone(dispLoc, area);
+        locations.push({ id: dispLoc, area, zone, type, l: 0, w: 0, h: 0, cube: 0, sku });
+      }s
     }
     count++;
   });
@@ -1558,7 +1568,8 @@ function updateSummary() {
   document.getElementById('sum-open').textContent   = locations.filter(l => !l.sku).length;
   document.getElementById('sum-disco').textContent  = discoLocs.length;
   document.getElementById('sum-repl').textContent   = items.filter(i => (i.replens||0) >= 10).length;
-  document.getElementById('sum-unslot').textContent = items.filter(i => !locations.find(l => l.sku === i.sku)).length;
+  // Unslotted = no dispLoc in velocity AND not found in location DB
+  document.getElementById('sum-unslot').textContent = items.filter(i => !i.slot && !locations.find(l => l.sku === i.sku)).length;
 
   const ok = items.length > 0 && locations.length > 0;
   document.getElementById('import-action').innerHTML = ok
