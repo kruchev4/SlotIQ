@@ -1037,15 +1037,19 @@ function scorePlacement(item, loc) {
   const diff = Math.abs(velScore(item.velocity) - zoneScore(loc.zone));
   score += (5 - diff) * 8;
   // Cube efficiency (want 40–90% fill)  0–35 pts
+  // If either dimension is unknown (cube=0), give neutral score (17pts = half)
+  // rather than penalising items for missing location data
   if (item.icube > 0 && loc.cube > 0) {
     const ratio = item.icube / loc.cube;
     if (ratio >= 0.40 && ratio <= 0.90) score += 35;
     else if (ratio < 0.40) score += Math.round(ratio * 87);
     else score += Math.max(0, 35 - Math.round((ratio - 0.90) * 100));
+  } else {
+    score += 17;  // neutral: no dimension data, don't penalise or reward
   }
   // Type bonus  0–25 pts
   if (item.velocity === 'A' && loc.type === 'pallet') score += 25;  // pallet = A only
-  if (item.rtd === 'Y' && loc.type === 'rtd') score += 25;            // RTD match bonus
+  if (item.rtd === 'Y' && loc.type === 'rtd') score += 25;          // RTD match bonus
   else if (['C','D'].includes(item.velocity) && loc.type === 'small_bin') score += 20;
   else if (loc.type === 'standard') score += 10;
   return Math.min(100, Math.round(score));
@@ -2214,7 +2218,7 @@ function renderDashboard() {
 
   document.getElementById('dash-stats').innerHTML =
     `<div class="sc"><div class="sc-lbl">Total Locations</div><div class="sc-val">${total.toLocaleString()}</div><div class="sc-sub">${total ? Math.round(used/total*100) : 0}% occupied</div></div>
-     <div class="sc"><div class="sc-lbl">Occupied Locations</div><div class="sc-val">${used.toLocaleString()}</div><div class="sc-sub">${inVelocity.toLocaleString()} in velocity · ${occupiedOnly.toLocaleString()} not in velocity</div></div>
+     <div class="sc"><div class="sc-lbl">Occupied Locations</div><div class="sc-val">${used.toLocaleString()}</div><div class="sc-sub">${inVelocity.toLocaleString()} in velocity · ${occupiedOnly.toLocaleString()} seed-only · ${locations.filter(l=>!l.cube||l.cube===0).length} no dimensions</div></div>
      <div class="sc"><div class="sc-lbl">Velocity Items</div><div class="sc-val">${items.length.toLocaleString()}</div><div class="sc-sub">with picks/cube/replen data</div></div>
      <div class="sc"><div class="sc-lbl">Gold Zone Pick %</div><div class="sc-val" style="color:var(--gold)">${gp}%</div><div class="sc-sub">of all 30-day picks · ${goldOccupied}/${goldLocs.length} slots filled</div></div>
      <div class="sc"><div class="sc-lbl">A-Items in Gold</div><div class="sc-val" style="color:var(--suc)">${aItems.length ? Math.round(aInGold/aItems.length*100) : 0}%</div><div class="sc-sub">${aInGold} of ${aItems.length} A-items · ${totalPicks > 0 ? Math.round(goldPicks/totalPicks*100) : 0}% of picks from gold</div></div>
@@ -2261,14 +2265,49 @@ function renderDashboard() {
 
   document.getElementById('overall-score-badge').textContent = `Avg: ${avg}%`;
   document.getElementById('overall-score-badge').className = `badge ${avg >= 75 ? 'b-match' : avg >= 50 ? 'b-warn' : 'b-bad'}`;
+  // Cube efficiency breakdown for slotted velocity items
+  let cubeNA=0, cubeUnder=0, cubeGood=0, cubeOver=0;
+  let cubeRatios = [];
+  items.forEach(item => {
+    const loc = skuToLoc2.get(item.sku);
+    if (!loc) return;
+    if (!item.icube || !loc.cube) { cubeNA++; return; }
+    const ratio = item.icube / loc.cube;
+    cubeRatios.push(ratio);
+    if (ratio < 0.10)       cubeUnder++;   // massively undersized
+    else if (ratio < 0.40)  cubeUnder++;   // undersized
+    else if (ratio <= 0.90) cubeGood++;    // ideal fill
+    else                    cubeOver++;    // overfilled
+  });
+  const avgRatio = cubeRatios.length ? Math.round(cubeRatios.reduce((a,b)=>a+b,0)/cubeRatios.length*100) : 0;
+  const cubeTotal = cubeUnder + cubeGood + cubeOver;
+
   document.getElementById('slot-breakdown').innerHTML =
-    `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+    `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
        ${[['Excellent (≥80%)',ex,'#16a34a'],['Good (60–79%)',gd,'#2563eb'],['Fair (40–59%)',fr,'#d97706'],['Poor (<40%)',pr,'#dc2626']]
          .map(([lbl,val,c]) => `<div style="text-align:center">
            <div style="font-size:26px;font-weight:700;color:${c}">${val}</div>
            <div class="txt-sm txt-muted">${lbl}</div>
            <div class="prog" style="margin-top:6px"><div class="prog-fill" style="width:${t2?Math.round(val/t2*100):0}%;background:${c}"></div></div>
          </div>`).join('')}
+     </div>
+     <div style="border-top:1px solid var(--bdr);padding-top:14px;margin-top:4px">
+       <div style="font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">
+         Cube Efficiency Breakdown <span style="font-weight:400;margin-left:8px">avg fill ratio: <strong style="color:${avgRatio>=40&&avgRatio<=90?'#16a34a':avgRatio<20?'#dc2626':'#d97706'}">${avgRatio}%</strong></span>
+       </div>
+       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+         ${[
+           ['📐 No Cube Data', cubeNA, '#94a3b8', 'dimensions missing'],
+           ['📦 Undersized (<40% fill)', cubeUnder, '#dc2626', 'item too small for slot'],
+           ['✅ Ideal (40–90% fill)', cubeGood, '#16a34a', 'good cube match'],
+           ['⚠️ Overfilled (>90%)', cubeOver, '#d97706', 'item too large for slot']
+         ].map(([lbl,val,c,sub]) => `<div style="text-align:center">
+           <div style="font-size:22px;font-weight:700;color:${c}">${val}</div>
+           <div class="txt-sm txt-muted">${lbl}</div>
+           <div class="txt-sm" style="color:${c};margin-top:2px">${sub}</div>
+           <div class="prog" style="margin-top:6px"><div class="prog-fill" style="width:${cubeTotal?Math.round(val/cubeTotal*100):0}%;background:${c}"></div></div>
+         </div>`).join('')}
+       </div>
      </div>`;
 
   const alerts = [];
@@ -2278,6 +2317,19 @@ function renderDashboard() {
   if (items.filter(i => (i.replens||0) >= 10).length > 0)
     alerts.push(`<div class="alert a-info" style="margin-top:8px">🔴 <strong>${items.filter(i=>(i.replens||0)>=10).length} items</strong> have high replen counts — candidates for larger locations.
       <button class="btn btn-sec btn-sm" style="margin-left:8px" onclick="showPage('replen')">View Replen Alerts →</button></div>`);
+
+  // Zero-cube diagnostic
+  const zeroCubeLocs   = locations.filter(l => !l.cube || l.cube === 0);
+  const zeroCubeOccupied = zeroCubeLocs.filter(l => l.sku).length;
+  const zeroCubeItems  = items.filter(i => {
+    const loc = skuToLoc2.get(i.sku);
+    return loc && (!loc.cube || loc.cube === 0);
+  }).length;
+  if (zeroCubeLocs.length > 0)
+    alerts.push(`<div class="alert a-warn" style="margin-top:8px">📐 <strong>${zeroCubeLocs.length} locations</strong> have no cube dimensions (${zeroCubeOccupied} occupied, affecting ${zeroCubeItems} items).
+      Cube efficiency scores are estimated for these — import the Open Locations report to add dimensions.
+      <button class="btn btn-sec btn-sm" style="margin-left:8px" onclick="showPage('locations');swLocTab('list',document.querySelectorAll('.itab')[2]);setTimeout(()=>{document.getElementById('loc-ft').value='';document.getElementById('loc-fa').value='';document.getElementById('loc-search').value='';renderLocations();},50)">View Locations →</button></div>`);
+
   document.getElementById('dash-alerts').innerHTML = alerts.join('');
 }
 
