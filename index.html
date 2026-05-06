@@ -1222,6 +1222,21 @@ async function parseVelocity(rows) {
   // bottom 20% = D
 
   let count = 0;
+  // Diagnostic: log first 3 rows so we can see exactly what was parsed
+  console.log('[Velocity] Headers detected:', rows.length ? Object.keys(rows[0]) : []);
+  rows.slice(0, 3).forEach((r, i) => {
+    console.log(`[Velocity] Row ${i}:`, {
+      item_name: r['item_name'],
+      on_hand_qty: r['on_hand_qty'],
+      orig_order_qty: r['orig_order_qty'],
+      item_bar_code: r['item_bar_code'],
+      display_location: r['display_location'],
+      repln_tasks: r['repln_tasks'],
+      repln_qty: r['repln_qty'],
+      _all_keys: Object.keys(r),
+      _all_vals: Object.values(r)
+    });
+  });
   rows.forEach(r => {
     // Column mapping:
     //   Item1     = garbage/noise — IGNORED
@@ -1234,7 +1249,10 @@ async function parseVelocity(rows) {
     const w = +ff(r, ['item_unit_width', 'unit_width', 'width','wid'])  || 0;
     const h = +ff(r, ['item_unit_height','unit_height','height','hgt']) || 0;
     const picks   = +ff(r, ['orig_order_qty','order_qty','picks','units_picked','orig_order']) || 0;
-    const dispLoc =  ff(r, ['display_location','location','loc','slot','disp_location']);
+    const rawDispLoc = ff(r, ['display_location','location','loc','slot','disp_location']).trim();
+    // Validate: real location IDs start with 2 letters followed by digits (e.g. FA0844C05)
+    // Reject blanks, pure numbers, and short strings that are clearly not location IDs
+    const dispLoc = /^[A-Za-z]{2}\d/.test(rawDispLoc) ? rawDispLoc : '';
     // Barcode: Excel may export as scientific notation (7.67E+11) — keep as string, don't parse
     const rawBarcode = ff(r, ['item_bar_code','bar_code','barcode','upc']);
     const barcode = rawBarcode.toString().trim();
@@ -1277,6 +1295,7 @@ async function parseVelocity(rows) {
     // 2. Stamp the Display Location with this SKU — always, overwriting stale seed data
     // 3. Set item.slot so the item shows as "slotted" in the slotting engine
     if (dispLoc) {
+      console.log('[Velocity] Syncing dispLoc:', dispLoc, 'for SKU:', sku, '| rawDispLoc was:', rawDispLoc);
       // Clear stale assignment if item moved slots since last import
       const prevLoc = locations.find(lc => lc.sku === sku && lc.id !== dispLoc);
       if (prevLoc) prevLoc.sku = null;
@@ -1285,11 +1304,16 @@ async function parseVelocity(rows) {
       if (curLoc) {
         curLoc.sku = sku;   // authoritative — overwrites whatever seed put here
       } else {
-        // Location not in DB yet (wasn't in seed) — add it as a basic placeholder
-        // Zone/type will be unknown until location report is imported
-        const area = dispLoc.substring(0, 2);
-        const { zone, type } = autoZone(dispLoc, area);
-        locations.push({ id: dispLoc, area, zone, type, l: 0, w: 0, h: 0, cube: 0, sku });
+        // Location not in DB yet — add placeholder ONLY if ID looks genuinely valid
+        // Must be at least 5 chars and match warehouse ID pattern
+        if (dispLoc.length >= 5 && /^[A-Za-z]{2}\d{2,}/.test(dispLoc)) {
+          const area = dispLoc.substring(0, 2);
+          const { zone, type } = autoZone(dispLoc, area);
+          locations.push({ id: dispLoc, area, zone, type, l: 0, w: 0, h: 0, cube: 0, sku });
+          console.log('[Velocity] Created placeholder loc:', dispLoc, 'for SKU:', sku);
+        } else {
+          console.warn('[Velocity] REJECTED placeholder loc - invalid ID:', JSON.stringify(dispLoc), 'raw was:', JSON.stringify(rawDispLoc), 'for SKU:', sku);
+        }
       }
     }
     count++;
@@ -1364,9 +1388,13 @@ async function parseDisco(rows) {
 // Dimensions format: 150x48x50 (L×W×H)
 async function parseOpen(rows) {
   let added = 0, updated = 0;
+  console.log('[OpenLocs] Headers:', rows.length ? Object.keys(rows[0]) : []);
+  rows.slice(0, 3).forEach((r, i) => console.log(`[OpenLocs] Row ${i}:`, Object.values(r)));
   rows.forEach(r => {
     const locId = ff(r, ['location_barcode','barcode','location_id','locn','location']);
     if (!locId) return;
+    // Reject IDs that don't look like real warehouse locations (2 letters + digit)
+    if (!/^[A-Za-z]{2}\d/.test(locId)) { console.warn('[OpenLocs] Rejected locId:', locId); return; }
 
     const area  = ff(r, ['pick_locn_area','locn_area','area','bank','zone_area']);
     const dims  = ff(r, ['dimensions','dims','size','dimension']);
@@ -1524,10 +1552,13 @@ async function parseReplen(rows) {
 // Columns: Location Barcode, Pick Locn Area, Dimensions, Location Volume, [optional assigned Item/SKU]
 async function parseLocSeed(rows) {
   let added = 0, updated = 0;
+  console.log('[LocSeed] Headers:', rows.length ? Object.keys(rows[0]) : []);
+  rows.slice(0, 3).forEach((r, i) => console.log(`[LocSeed] Row ${i}:`, Object.values(r)));
   rows.forEach(r => {
     const locId = ff(r, ['location_barcode','barcode','location_id','location','loc_id',
                           'pick_loc','locn','loc']);
     if (!locId) return;
+    if (!/^[A-Za-z]{2}\d/.test(locId)) { console.warn('[LocSeed] Rejected locId:', locId); return; }
 
     const area  = ff(r, ['pick_locn_area','area','bank','locn_area','zone_area']);
     const dims  = ff(r, ['dimensions','dims','size','l_x_w_x_h','dim']);
