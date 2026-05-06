@@ -1290,7 +1290,7 @@ async function parseVelocity(rows) {
         const area = dispLoc.substring(0, 2);
         const { zone, type } = autoZone(dispLoc, area);
         locations.push({ id: dispLoc, area, zone, type, l: 0, w: 0, h: 0, cube: 0, sku });
-      }s
+      }
     }
     count++;
   });
@@ -2169,13 +2169,22 @@ function runNewItem() {
   document.getElementById('ni-results').innerHTML = html;
 }
 
-function assignNew(sku, item_desc, l, w, h, vel, crush, locId) {
+async function assignNew(sku, item_desc, l, w, h, vel, crush, locId) {
   const ic = itemCube(l, w, h);
-  if (!items.find(i => i.sku === sku))
-    items.push({ sku, item_desc, l, w, h, icube: ic, velocity: vel, crushable: crush, picks30: 0, replens: 0 });
+  const rtd = document.getElementById('ni-rtd')?.value || 'N';
+  const existing = items.find(i => i.sku === sku);
+  if (!existing)
+    items.push({ sku, item_desc, l, w, h, icube: ic, velocity: vel, crushable: crush, rtd, picks30: 0, replens: 0, slot: locId });
+  else
+    existing.slot = locId;
+  // Mark the location as occupied immediately so it's not offered again
   const loc = locations.find(lc => lc.id === locId);
   if (loc) loc.sku = sku;
-  persist(); toast(`✅ ${sku} → ${locId}`); showPage('slotting');
+  _cacheValid = false;  // invalidate cache so new item shows correctly
+  await saveItems();
+  await saveLocations();
+  toast(`✅ ${sku} → ${locId}`);
+  showPage('slotting');
 }
 
 // ═══════════════════════════════════════════════════════
