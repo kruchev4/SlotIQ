@@ -656,9 +656,7 @@ async function loadFromSupabase() {
     ]);
 
     locations = locs;
-    // Sanitize replens on load — cap at 9999 to clear any barcode values
-    // stored from previous imports when column mapping was wrong
-    items = itms.map(i => ({ ...i, replens: Math.min(+(i.replens||0), 9999) }));
+    items     = itms;
     discoLocs = (discoRes.data || []).map(r => r.loc_id);
 
     if (ruleRes.data && !ruleRes.error) {
@@ -711,7 +709,7 @@ function sanitizeItem(item) {
     picks30:   +item.picks30  || 0,
     dispLoc:   item.dispLoc   || item.slot || null,
     slot:      item.slot      || null,
-    replens:   Math.min(+(item.replens||0), 9999),  // cap: barcodes are > 9999
+    replens:   +item.replens  || 0,
   };
 }
 
@@ -1120,13 +1118,16 @@ function processFile(file, type) {
 // ═══════════════════════════════════════════════════════
 function parseCSV(text) {
   const lines = text.split(/\r?\n/);
-  // Find header row: most fields non-empty, contains alphabetic text
+  // Find the first line that looks like a real data header.
+  // Key requirement: most fields must be NON-EMPTY (title rows like
+  // "Disco Items with Inventory\t\t\t\t..." have 1 real field + many blanks).
   let hi = 0;
   for (let i = 0; i < Math.min(25, lines.length); i++) {
     const l = lines[i].trim();
     if (!l) continue;
     const parts = l.split(/\t|,/);
     const nonEmpty = parts.filter(p => p.trim()).length;
+    // Need 5+ non-empty fields AND majority non-empty (filters title rows with trailing tabs)
     if (nonEmpty >= 5 && nonEmpty >= parts.length * 0.5 && /[a-zA-Z]{2,}/.test(l)) {
       hi = i; break;
     }
@@ -1138,26 +1139,11 @@ function parseCSV(text) {
       .replace(/[\s\/\\\-]+/g, '_')
       .replace(/[^a-z0-9_]/g, '')
   );
-  const numCols = headers.length;
   const rows = [];
   for (let i = hi + 1; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
-
-    // Pre-process: strip commas from numbers before splitting.
-    // This handles cases where the WMS exports numeric values like "1,680"
-    // without quoting them, which would cause extra columns when split by comma.
-    // Replace commas that are between digits (thousands separators) with nothing.
-    const cleanLine = line.replace(/(\d),(\d)/g, '$1$2')
-                          .replace(/(\d),(\d)/g, '$1$2'); // run twice for e.g. "1,234,567"
-
-    const rawCols = cleanLine.split(delim).map(c => c.trim().replace(/^"|"$/g, ''));
-
-    // If we get more columns than headers, data has unquoted commas — already handled above
-    // If somehow still mismatched, pad or trim to match header count
-    const cols = rawCols.length === numCols ? rawCols :
-                 rawCols.length > numCols   ? rawCols.slice(0, numCols) :
-                 [...rawCols, ...Array(numCols - rawCols.length).fill('')];
+    const cols = line.split(delim).map(c => c.trim().replace(/^"|"$/g, '').replace(/,/g, ''));
     if (cols.length < 2 || cols.every(c => !c)) continue;
     const obj = {};
     headers.forEach((h, idx) => { obj[h] = cols[idx] || ''; });
@@ -1236,8 +1222,21 @@ async function parseVelocity(rows) {
   // bottom 20% = D
 
   let count = 0;
-  // Column mapping confirmed: item_name=SKU, display_location=slot, repln_tasks=replen count
-  let newPlaceholders = 0;
+  // Diagnostic: log first 3 rows so we can see exactly what was parsed
+  console.log('[Velocity] Headers detected:', rows.length ? Object.keys(rows[0]) : []);
+  rows.slice(0, 3).forEach((r, i) => {
+    console.log(`[Velocity] Row ${i}:`, {
+      item_name: r['item_name'],
+      on_hand_qty: r['on_hand_qty'],
+      orig_order_qty: r['orig_order_qty'],
+      item_bar_code: r['item_bar_code'],
+      display_location: r['display_location'],
+      repln_tasks: r['repln_tasks'],
+      repln_qty: r['repln_qty'],
+      _all_keys: Object.keys(r),
+      _all_vals: Object.values(r)
+    });
+  });
   rows.forEach(r => {
     // Column mapping:
     //   Item1     = garbage/noise — IGNORED
@@ -1304,26 +1303,16 @@ async function parseVelocity(rows) {
       if (curLoc) {
         curLoc.sku = sku;   // authoritative — overwrites whatever seed put here
       } else {
-        // Location not in DB yet — add placeholder ONLY if ID looks genuinely valid
-        // Must be at least 5 chars and match warehouse ID pattern
-        if (dispLoc.length >= 5 && /^[A-Za-z]{2}\d{2,}/.test(dispLoc)) {
-          const area = dispLoc.substring(0, 2);
-          const { zone, type } = autoZone(dispLoc, area);
-          locations.push({ id: dispLoc, area, zone, type, l: 0, w: 0, h: 0, cube: 0, sku });
-          newPlaceholders++;
-        } else {
-          console.warn('[Velocity] REJECTED placeholder loc - invalid ID:', JSON.stringify(dispLoc), 'raw was:', JSON.stringify(rawDispLoc), 'for SKU:', sku);
-        }
+        // Location not in DB yet (wasn't in seed) — add it as a basic placeholder
+        // Zone/type will be unknown until location report is imported
+        const area = dispLoc.substring(0, 2);
+        const { zone, type } = autoZone(dispLoc, area);
+        locations.push({ id: dispLoc, area, zone, type, l: 0, w: 0, h: 0, cube: 0, sku });
       }
     }
     count++;
   });
 
-  if (newPlaceholders > 0) console.log(`[Velocity] Created ${newPlaceholders} placeholder locations`);
-  console.log('[Velocity] Sample item before save:', items[0]);
-  console.log('[Velocity] Sample sanitized item:', sanitizeItem(items[0]));
-  console.log('[Velocity] items count:', items.length, '| locations count:', locations.length);
-  console.log('[Velocity] Sample loc with sku:', locations.find(l=>l.sku));
   _cacheValid = false; _palletEligSet = null;
   await saveItems();
   await saveLocations();   // persist sku assignments set from Display Location
@@ -1393,12 +1382,9 @@ async function parseDisco(rows) {
 // Dimensions format: 150x48x50 (L×W×H)
 async function parseOpen(rows) {
   let added = 0, updated = 0;
-
   rows.forEach(r => {
     const locId = ff(r, ['location_barcode','barcode','location_id','locn','location']);
     if (!locId) return;
-    // Reject IDs that don't look like real warehouse locations (2 letters + digit)
-    if (!/^[A-Za-z]{2}\d/.test(locId)) { console.warn('[OpenLocs] Rejected locId:', locId); return; }
 
     const area  = ff(r, ['pick_locn_area','locn_area','area','bank','zone_area']);
     const dims  = ff(r, ['dimensions','dims','size','dimension']);
@@ -1556,12 +1542,10 @@ async function parseReplen(rows) {
 // Columns: Location Barcode, Pick Locn Area, Dimensions, Location Volume, [optional assigned Item/SKU]
 async function parseLocSeed(rows) {
   let added = 0, updated = 0;
-
   rows.forEach(r => {
     const locId = ff(r, ['location_barcode','barcode','location_id','location','loc_id',
                           'pick_loc','locn','loc']);
     if (!locId) return;
-    if (!/^[A-Za-z]{2}\d/.test(locId)) { console.warn('[LocSeed] Rejected locId:', locId); return; }
 
     const area  = ff(r, ['pick_locn_area','area','bank','locn_area','zone_area']);
     const dims  = ff(r, ['dimensions','dims','size','l_x_w_x_h','dim']);
@@ -2068,7 +2052,7 @@ function exportSlottingCSV() {
 // ═══════════════════════════════════════════════════════
 function renderReplens() {
   const thresh = +(document.getElementById('repl-thresh')?.value) || 10;
-  const ri = items.filter(i => { const r = i.replens||0; return r >= thresh && r <= 9999; })
+  const ri = items.filter(i => (i.replens||0) >= thresh)
                   .sort((a, b) => (b.replens||0) - (a.replens||0));
 
   const avg = ri.length
