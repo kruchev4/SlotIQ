@@ -588,8 +588,7 @@ Location or SKU    Replen_Count (30-day total)</pre>
 // ═══════════════════════════════════════════════════════
 // SUPABASE CONFIG
 // ═══════════════════════════════════════════════════════
-// 👇 Replace these two values with your own from Supabase dashboard
-//    Project Settings → API → Project URL and anon public key
+// 
 const SUPABASE_URL  = 'https://ebwtjqzrwkycbnmhsulv.supabase.co';
 const SUPABASE_ANON = 'sb_publishable_dlSlJlh4bJSsqajG4dlfxA_YmXy5t8r';
 
@@ -1211,16 +1210,25 @@ async function parseVelocity(rows) {
   // Build set of incoming SKUs (item_name values) from this report
   const incomingSkus = new Set(rows.map(r => ffExact(r, ['item_name']) || '').filter(Boolean));
 
-  // Remove items whose SKUs aren't in the incoming velocity report
-  // (discontinued, no picks this period, etc.)
-  // NOTE: do NOT clear location assignments — locations may be occupied by items
-  // that simply had zero picks this period and don't appear in velocity.
-  // Only the open locations report and disco report should mark slots empty.
+  // Remove items not in this velocity report from both memory and Supabase.
+  // These are items from previous imports that are no longer active.
+  // Location assignments are preserved — the location keeps its sku even if
+  // the item record is removed (seed-only items aren't in velocity).
   const before = items.length;
+  const staleSkus = items.filter(i => !incomingSkus.has(i.sku)).map(i => i.sku);
   items = items.filter(i => incomingSkus.has(i.sku));
-  const removed = before - items.length;
-  if (removed > 0) {
-    console.log(`[Velocity] Removed ${removed} items not in this report (kept their location assignments)`);
+  const removed = staleSkus.length;
+
+  // Delete stale items from Supabase in batches so DB matches in-memory state
+  if (staleSkus.length > 0) {
+    console.log(`[Velocity] Deleting ${removed} stale items from Supabase`);
+    try {
+      for (const batch of chunk(staleSkus, 200)) {
+        await sb.from('items').delete().in('sku', batch);
+      }
+    } catch(e) {
+      console.error('Error deleting stale items:', e);
+    }
   }
 
   // Reset replen counts — velocity report is the source of truth
