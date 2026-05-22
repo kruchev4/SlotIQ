@@ -434,7 +434,10 @@ Location or SKU    Replen_Count (30-day total)</pre>
         <input id="slot-search" placeholder="Search SKU or description…" style="width:210px" oninput="renderSlotting()">
         <select id="slot-filter" style="width:180px" onchange="renderSlotting()">
           <option value="all">All Items</option>
-          <option value="reslot">🔄 Re-slot Suggestions</option>
+          <option value="reslot">🔄 All Re-slot Suggestions</option>
+          <option value="reslot_p1">🚨 P1: Wrong type (pallet)</option>
+          <option value="reslot_p2">🥇 P2: Slow mover in Gold</option>
+          <option value="reslot_p3">📈 P3: Zone mismatch (>25pts)</option>
           <option value="new">✨ Unslotted Items</option>
           <option value="repl_alert">🔴 High Replen Count</option>
           <option value="A">Velocity A (Hot)</option>
@@ -588,7 +591,8 @@ Location or SKU    Replen_Count (30-day total)</pre>
 // ═══════════════════════════════════════════════════════
 // SUPABASE CONFIG
 // ═══════════════════════════════════════════════════════
-// 
+// 👇 Replace these two values with your own from Supabase dashboard
+//    Project Settings → API → Project URL and anon public key
 const SUPABASE_URL  = 'https://ebwtjqzrwkycbnmhsulv.supabase.co';
 const SUPABASE_ANON = 'sb_publishable_dlSlJlh4bJSsqajG4dlfxA_YmXy5t8r';
 
@@ -1842,18 +1846,35 @@ function buildSlotCache() {
     const bestLoc = findBestLocFast(item, openByType, skuToLoc);
     const curScore  = curLoc  ? scorePlacement(item, curLoc)  : 0;
     const bestScore = bestLoc ? scorePlacement(item, bestLoc) : 0;
-    // Only flag as reslot if:
-    // 1. There IS a current location
-    // 2. The best location is genuinely different
-    // 3. The improvement is strictly > 15 points (not just equal)
-    // 4. The move is actually meaningful (different zone OR different type)
-    const meaningfulMove = bestLoc && curLoc && (
-      bestLoc.zone !== curLoc.zone || bestLoc.type !== curLoc.type
-    );
-    const needsReslot = !!(curLoc && bestLoc && bestLoc.id !== curLoc.id
-      && (bestScore - curScore) > 15
-      && meaningfulMove);
-    return { item, curLoc, bestLoc, curScore, bestScore, needsReslot, repl: item.replens || 0 };
+    // Priority-tiered reslot flags:
+    // P1 CRITICAL: non-A item in pallet flow — must move regardless of score
+    // P2 HIGH:     B/C/D item in gold zone — wasting premium ergonomic real estate
+    // P3 MEDIUM:   item in wrong zone with >25pt improvement available
+    // (P4 minor cube differences — ignored, not actionable at scale)
+    let reslotPriority = 0;
+    let reslotReason = '';
+    if (curLoc && bestLoc && bestLoc.id !== curLoc.id) {
+      // P1: non-A in pallet flow
+      if (curLoc.type === 'pallet' && item.velocity !== 'A') {
+        reslotPriority = 1;
+        reslotReason = 'Non-A item in pallet flow';
+      }
+      // P2: slow mover in gold zone (B, C, or D in gold)
+      else if (curLoc.zone === 'gold' && item.velocity !== 'A') {
+        reslotPriority = 2;
+        reslotReason = `${item.velocity}-velocity item in Gold zone`;
+      }
+      // P3: meaningful zone/type mismatch with significant score gap
+      else if (
+        (bestLoc.zone !== curLoc.zone || bestLoc.type !== curLoc.type) &&
+        (bestScore - curScore) > 25
+      ) {
+        reslotPriority = 3;
+        reslotReason = `+${bestScore - curScore}pt improvement available`;
+      }
+    }
+    const needsReslot = reslotPriority > 0;
+    return { item, curLoc, bestLoc, curScore, bestScore, needsReslot, reslotPriority, reslotReason, repl: item.replens || 0 };
   });
 
   _cacheValid = true;
@@ -1909,7 +1930,10 @@ function renderSlotting() {
   if (!_cacheValid || _slotCache.length !== items.length) buildSlotCache();
   const rows = _slotCache;
 
-  const reslotN = rows.filter(r => r.needsReslot).length;
+  const reslotN  = rows.filter(r => r.needsReslot).length;
+  const reslotP1 = rows.filter(r => r.reslotPriority === 1).length;
+  const reslotP2 = rows.filter(r => r.reslotPriority === 2).length;
+  const reslotP3 = rows.filter(r => r.reslotPriority === 3).length;
   const unslotN = rows.filter(r => !r.curLoc).length;
   const replN   = rows.filter(r => r.repl >= 10).length;
 
@@ -1929,7 +1953,9 @@ function renderSlotting() {
 
   document.getElementById('slot-chips').innerHTML =
     `<span class="chip">📦 ${items.length} items</span>
-     <span class="chip" style="background:#fffbeb">🔄 ${reslotN} re-slot suggestions</span>
+     <span class="chip" style="background:#fef2f2">🚨 ${reslotP1} pallet-type</span>
+     <span class="chip" style="background:#fffbeb">🥇 ${reslotP2} slow-in-gold</span>
+     <span class="chip" style="background:#f0f9ff">📈 ${reslotP3} zone-mismatch</span>
      <span class="chip" style="background:#f0fdf4">✨ ${unslotN} unslotted</span>
      <span class="chip" style="background:#fdf4ff">🔴 ${replN} high replen</span>
      <span class="chip">${locations.filter(l=>l.sku).length} / ${locations.length.toLocaleString()} locs used</span>`;
@@ -1937,6 +1963,9 @@ function renderSlotting() {
   let filtered = rows
     .filter(r => {
       if (filt === 'reslot')      return r.needsReslot;
+    if (filt === 'reslot_p1')  return r.reslotPriority === 1;
+    if (filt === 'reslot_p2')  return r.reslotPriority === 2;
+    if (filt === 'reslot_p3')  return r.reslotPriority === 3;
       if (filt === 'new')         return !r.curLoc;
       if (filt === 'repl_alert')  return r.repl >= 10;
       if (['A','B','C','D'].includes(filt)) return r.item.velocity === filt;
@@ -1955,8 +1984,11 @@ function renderSlotting() {
   }
 
   document.getElementById('slot-tbody').innerHTML = filtered.slice(0, 300).map(
-    ({ item, curLoc, bestLoc, curScore, bestScore, needsReslot, repl }) => {
-      const rc = needsReslot ? 'row-reslot' : !curLoc ? 'row-new' : repl >= 10 ? 'row-repl' : '';
+    ({ item, curLoc, bestLoc, curScore, bestScore, needsReslot, reslotPriority, reslotReason, repl }) => {
+      const rc = reslotPriority === 1 ? 'row-reslot' :
+                 reslotPriority === 2 ? 'row-reslot' :
+                 reslotPriority === 3 ? 'row-reslot' :
+                 !curLoc ? 'row-new' : repl >= 10 ? 'row-repl' : '';
       const sc = bestScore;
       const scColor = sc >= 75 ? '#16a34a' : sc >= 50 ? '#d97706' : '#dc2626';
       return `<tr class="${rc}">
@@ -1971,7 +2003,9 @@ function renderSlotting() {
           : '<span class="txt-muted txt-sm">Unslotted</span>'}</td>
         <td>${bestLoc
           ? `<span class="chip">${bestLoc.id}</span> <span class="badge b-${bestLoc.zone}">${zoneIcon(bestLoc.zone)}</span>
-             ${needsReslot ? ` <span class="badge b-warn">+${bestScore - curScore}pts</span>` : ''}`
+             ${reslotPriority === 1 ? ' <span class="badge" style="background:#fef2f2;color:#991b1b;border:1px solid #fca5a5">🚨 P1</span>' :
+                       reslotPriority === 2 ? ' <span class="badge" style="background:#fffbeb;color:#92400e;border:1px solid #fcd34d">🥇 P2</span>' :
+                       reslotPriority === 3 ? ' <span class="badge b-warn">+${bestScore - curScore}pts</span>' : ''}`
           : '<span class="txt-muted txt-sm">No compatible loc</span>'}</td>
         <td>${bestLoc
           ? `<span style="font-size:12px;font-weight:700;color:${scColor}">${sc}%</span>
@@ -2258,7 +2292,7 @@ function renderDashboard() {
   const goldLocs     = locations.filter(l => l.zone === 'gold');
   const goldOccupied = goldLocs.filter(l => l.sku).length;
   // Use slot cache for reslot count — avoids re-running findBestLoc for every item
-  const reslot = (_cacheValid ? _slotCache : []).filter(r => r.needsReslot).length;
+  const reslot = (_cacheValid ? _slotCache : []).filter(r => r.reslotPriority > 0).length;
 
   // Occupied = any location with a sku string (from seed or velocity)
   // In velocity = locations whose sku matches an item record (full data available)
@@ -2360,9 +2394,20 @@ function renderDashboard() {
      </div>`;
 
   const alerts = [];
-  if (reslot > 0)
-    alerts.push(`<div class="alert a-warn" style="margin-top:12px">🔄 <strong>${reslot} items</strong> have a meaningfully better available slot (≥15pt improvement).
-      <button class="btn btn-warn btn-sm" style="margin-left:8px" onclick="showPage('slotting');setTimeout(()=>{document.getElementById('slot-filter').value='reslot';renderSlotting();},50)">View Re-slots →</button></div>`);
+  // Reslot counts by priority from cache
+  const reslotP1dash = (_cacheValid ? _slotCache : []).filter(r => r.reslotPriority === 1).length;
+  const reslotP2dash = (_cacheValid ? _slotCache : []).filter(r => r.reslotPriority === 2).length;
+  const reslotP3dash = (_cacheValid ? _slotCache : []).filter(r => r.reslotPriority === 3).length;
+  const reslotTotal  = reslotP1dash + reslotP2dash + reslotP3dash;
+  if (reslotTotal > 0)
+    alerts.push(`<div class="alert a-warn" style="margin-top:12px">
+      🔄 <strong>${reslotTotal} re-slot candidates</strong> identified:
+      ${reslotP1dash > 0 ? `<span style="color:#dc2626;font-weight:600"> 🚨 ${reslotP1dash} non-A in pallet</span>` : ''}
+      ${reslotP2dash > 0 ? `<span style="color:#d97706;font-weight:600"> · 🥇 ${reslotP2dash} slow movers in gold</span>` : ''}
+      ${reslotP3dash > 0 ? `<span style="color:#2563eb;font-weight:600"> · 📈 ${reslotP3dash} zone mismatches</span>` : ''}
+      <button class="btn btn-warn btn-sm" style="margin-left:8px" onclick="showPage('slotting');setTimeout(()=>{document.getElementById('slot-filter').value='reslot_p1';renderSlotting();},50)">View P1 →</button>
+      <button class="btn btn-sec btn-sm" style="margin-left:4px" onclick="showPage('slotting');setTimeout(()=>{document.getElementById('slot-filter').value='reslot_p2';renderSlotting();},50)">View P2 →</button>
+    </div>`);
   if (items.filter(i => (i.replens||0) >= 10).length > 0)
     alerts.push(`<div class="alert a-info" style="margin-top:8px">🔴 <strong>${items.filter(i=>(i.replens||0)>=10).length} items</strong> have high replen counts — candidates for larger locations.
       <button class="btn btn-sec btn-sm" style="margin-left:8px" onclick="showPage('replen')">View Replen Alerts →</button></div>`);
